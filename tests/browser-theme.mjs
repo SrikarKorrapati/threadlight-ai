@@ -123,6 +123,7 @@ try {
   await page.addScriptTag({ path: path.join(projectRoot, 'extension/adapter.js') });
   await page.addScriptTag({ path: path.join(projectRoot, 'extension/layout.js') });
   await page.addScriptTag({ path: path.join(projectRoot, 'extension/commitments.js') });
+  await page.addScriptTag({ path: path.join(projectRoot, 'extension/launcher.js') });
   await page.addScriptTag({ path: path.join(projectRoot, 'extension/content.js') });
   await page.locator('#threadlight-root').waitFor({ state: 'attached' });
   await page.waitForFunction(() => mockBridge.requests.some(request => request.type === 'CAPTURE'));

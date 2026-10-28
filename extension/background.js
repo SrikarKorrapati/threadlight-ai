@@ -1,7 +1,12 @@
 import { createMemoryStore, migrateNameIdentityStore, validateChat, scopeKey, getChatState, captureMessages, saveProfile, recordAcceptance, addCommitments, updateTask, forgetChat, buildGenerationContext } from './memory.js';
 
-export const STORAGE_KEYS = { settings: 'wac.settings.v1', memory: 'wac.memory.v1' };
-export const DEFAULT_SETTINGS = Object.freeze({ bridgeUrl: 'http://127.0.0.1:4318', pairingToken: '', accountLabel: 'Personal', calendarAccount: '' });
+export const STORAGE_KEYS = { settings: 'wac.settings.v1', memory: 'wac.memory.v1', launcher: 'wac.launcher.v1' };
+export const DEFAULT_PROMPT_SHORTCUTS = Object.freeze([
+  Object.freeze({ id: 'default-friendly', label: 'Friendly', prompt: 'Make it friendly and natural.' }),
+  Object.freeze({ id: 'default-shorter', label: 'Shorter', prompt: 'Make it shorter without losing the meaning.' }),
+  Object.freeze({ id: 'default-professional', label: 'Professional', prompt: 'Make it professional without sounding stiff.' }),
+]);
+export const DEFAULT_SETTINGS = Object.freeze({ bridgeUrl: 'http://127.0.0.1:4318', pairingToken: '', accountLabel: 'Personal', calendarAccount: '', promptShortcuts: DEFAULT_PROMPT_SHORTCUTS });
 const MODES = new Set(['rewrite', 'reply', 'explain', 'calendar', 'commitments']);
 const ACCOUNT_SCOPED_MUTATIONS = new Set(['CAPTURE', 'IMPORT_MESSAGES', 'SAVE_PROFILE', 'ACCEPT', 'UPDATE_TASK', 'FORGET_CHAT']);
 const OPTIONS_PATH = 'options.html';
@@ -9,6 +14,35 @@ const OPTIONS_PATH = 'options.html';
 function field(value, max, name, required = false) {
   if (typeof value !== 'string' || value.length > max || (required && !value.trim())) throw new Error(`${name} is missing or invalid.`);
   return value;
+}
+function shortcutId(value) {
+  const id = field(value, 80, 'Prompt shortcut ID', true);
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) throw new Error('Invalid prompt shortcut ID.');
+  return id;
+}
+function shortcutFields(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid prompt shortcut.');
+  const label = field(value.label, 40, 'Shortcut name', true).trim();
+  const prompt = field(value.prompt, 1000, 'Shortcut instructions', true).trim();
+  if (/[\x00-\x1f\x7f]/.test(label) || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(prompt)) throw new Error('Prompt shortcuts contain invalid characters.');
+  return { label, prompt };
+}
+export function validatePromptShortcuts(value = DEFAULT_PROMPT_SHORTCUTS) {
+  if (!Array.isArray(value) || value.length > 20) throw new Error('Save at most 20 prompt shortcuts.');
+  const ids = new Set();
+  return value.map(item => {
+    const fields = shortcutFields(item), id = shortcutId(item.id);
+    if (ids.has(id)) throw new Error('Prompt shortcut IDs must be unique.');
+    ids.add(id);
+    return { id, ...fields };
+  });
+}
+export function validateLauncherPosition(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Number.isFinite(value.x) || !Number.isFinite(value.y) || value.x < 0 || value.x > 1 || value.y < 0 || value.y > 1) {
+    throw new Error('Launcher position must use coordinates between 0 and 1, or null to reset.');
+  }
+  return { x: value.x, y: value.y };
 }
 function zone(value) {
   field(value, 100, 'Time zone', true);
@@ -54,7 +88,7 @@ export function validateSettings(input) {
   if (parsed.origin !== 'http://127.0.0.1:4318' || parsed.username || parsed.password || !['', '/'].includes(parsed.pathname) || parsed.search || parsed.hash) throw new Error('The bridge must use http://127.0.0.1:4318.');
   const pairingToken = field(input.pairingToken || '', 512, 'Pairing token').trim();
   if (pairingToken && !/^[A-Za-z0-9_.~+-]+$/.test(pairingToken)) throw new Error('The pairing token contains invalid characters.');
-  return { bridgeUrl: parsed.origin, pairingToken, accountLabel: field(input.accountLabel, 120, 'Account label', true).trim(), calendarAccount: validateCalendarAccount(input.calendarAccount) };
+  return { bridgeUrl: parsed.origin, pairingToken, accountLabel: field(input.accountLabel, 120, 'Account label', true).trim(), calendarAccount: validateCalendarAccount(input.calendarAccount), promptShortcuts: validatePromptShortcuts(input.promptShortcuts) };
 }
 export function senderKind(sender, runtime) {
   if (!sender || sender.id !== runtime.id) return null;
@@ -87,6 +121,7 @@ function safeResult(result) {
 export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = globalThis.fetch, now = () => new Date().toISOString(), timers = globalThis } = {}) {
   if (!chromeApi?.runtime || !chromeApi?.storage?.local) throw new Error('Chrome extension APIs are unavailable.');
   let settings = { ...DEFAULT_SETTINGS };
+  let launcherPosition = null;
   let memory = createMemoryStore();
   let queue = Promise.resolve();
   const epochs = new Map();
@@ -95,8 +130,10 @@ export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = gl
     // Deny direct storage access from content scripts, including the pairing token.
     await chromeApi.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     if (chromeApi.storage.session?.setAccessLevel) await chromeApi.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
-    const saved = await chromeApi.storage.local.get([STORAGE_KEYS.settings, STORAGE_KEYS.memory]);
+    const saved = await chromeApi.storage.local.get([STORAGE_KEYS.settings, STORAGE_KEYS.memory, STORAGE_KEYS.launcher]);
     settings = validateSettings({ ...DEFAULT_SETTINGS, ...saved[STORAGE_KEYS.settings] });
+    try { launcherPosition = validateLauncherPosition(saved[STORAGE_KEYS.launcher] ?? null); }
+    catch { launcherPosition = null; }
     const migration = migrateNameIdentityStore(saved[STORAGE_KEYS.memory]);
     if (migration.changed) await chromeApi.storage.local.set({ [STORAGE_KEYS.memory]: migration.store });
     memory = migration.store;
@@ -118,6 +155,13 @@ export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = gl
         } catch { /* A tab may close or have no content script yet. */ }
       }
     } catch { /* Settings remain saved if tab enumeration is unavailable. */ }
+  }
+  async function savePromptShortcuts(promptShortcuts) {
+    const next = { ...settings, promptShortcuts };
+    await chromeApi.storage.local.set({ [STORAGE_KEYS.settings]: next });
+    settings = next;
+    await broadcastToWhatsApp({ type: 'UI_PROMPT_SHORTCUTS_CHANGED', promptShortcuts: structuredClone(promptShortcuts) });
+    return { ok: true, promptShortcuts: structuredClone(promptShortcuts) };
   }
   async function mutate(operation) {
     // Commit a full transaction only after persistence succeeds; quota errors cannot
@@ -210,17 +254,38 @@ export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = gl
         }
         case 'GET_SETTINGS':
           if (kind !== 'options') throw new Error('Settings and pairing tokens are only available on the extension Settings page.');
-          return { ok: true, settings: { ...settings } };
+          return { ok: true, settings: structuredClone(settings) };
         case 'SAVE_SETTINGS': {
           if (kind !== 'options') throw new Error('Only the extension Settings page may change settings.');
           const next = validateSettings(message.settings);
-          // The connection form does not edit the independent Calendar choice.
+          // The connection form does not edit independent global preferences.
           next.calendarAccount = settings.calendarAccount;
+          next.promptShortcuts = settings.promptShortcuts;
           await chromeApi.storage.local.set({ [STORAGE_KEYS.settings]: next });
           const accountChanged = next.accountLabel !== settings.accountLabel;
           settings = next;
           if (accountChanged) await broadcastToWhatsApp({ type: 'UI_ACCOUNT_CHANGED' });
-          return { ok: true, settings: { ...settings } };
+          return { ok: true, settings: structuredClone(settings) };
+        }
+        case 'GET_PROMPT_SHORTCUTS': return { ok: true, promptShortcuts: structuredClone(settings.promptShortcuts) };
+        case 'ADD_PROMPT_SHORTCUT': {
+          const fields = shortcutFields(message);
+          if (settings.promptShortcuts.length >= 20) throw new Error('Save at most 20 prompt shortcuts. Delete one before adding another.');
+          const id = 'shortcut-' + globalThis.crypto.randomUUID();
+          return savePromptShortcuts([...settings.promptShortcuts, { id, ...fields }]);
+        }
+        case 'DELETE_PROMPT_SHORTCUT': {
+          const id = shortcutId(message.id);
+          const next = settings.promptShortcuts.filter(item => item.id !== id);
+          if (next.length === settings.promptShortcuts.length) return { ok: true, promptShortcuts: structuredClone(next) };
+          return savePromptShortcuts(next);
+        }
+        case 'GET_LAUNCHER_POSITION': return { ok: true, position: structuredClone(launcherPosition) };
+        case 'SAVE_LAUNCHER_POSITION': {
+          const position = validateLauncherPosition(message.position);
+          await chromeApi.storage.local.set({ [STORAGE_KEYS.launcher]: position });
+          launcherPosition = position;
+          return { ok: true, position: structuredClone(position) };
         }
         case 'GET_CALENDAR_ACCOUNT': return { ok: true, calendarAccount: settings.calendarAccount };
         case 'SAVE_CALENDAR_ACCOUNT': {

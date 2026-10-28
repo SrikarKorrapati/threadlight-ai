@@ -94,6 +94,7 @@ try {
     await page.evaluate(installMockRuntime,fixture.url);
     await page.addScriptTag({path:path.join(projectRoot,'extension/layout.js')});
     await page.addScriptTag({path:path.join(projectRoot,'extension/commitments.js')});
+    await page.addScriptTag({path:path.join(projectRoot,'extension/launcher.js')});
     await page.addScriptTag({path:path.join(projectRoot,'extension/content.js')});
     await runInterfaceTests(page,check);
     await mkdir(path.join(projectRoot,'demo'),{recursive:true});

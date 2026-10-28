@@ -18,7 +18,16 @@
           <div class="label-row"><label for="source" id="source-label">Message</label><button class="link-btn" id="use-draft">Use draft</button></div>
           <textarea class="field source" id="source" data-testid="source-text" placeholder="Select text or write a message…" maxlength="20000"></textarea>
           <div class="prompt-wrap"><div class="label-row"><label for="prompt">Instructions</label></div><textarea class="field prompt" id="prompt" data-testid="prompt" placeholder="Tone, length, or details…" maxlength="4000"></textarea></div>
-          <div class="chips"><button class="chip" data-prompt="Make it friendly and natural.">Friendly</button><button class="chip" data-prompt="Make it shorter without losing the meaning.">Shorter</button><button class="chip" data-prompt="Make it professional without sounding stiff.">Professional</button></div>
+          <div class="shortcut-section">
+            <div class="shortcut-heading"><span class="label">Shared shortcuts</span><span class="spacer"></span><button class="link-btn" id="shortcut-add" data-testid="shortcut-add" aria-label="Add shortcut" disabled>＋ Add</button><button class="link-btn" id="shortcut-manage" data-testid="shortcut-manage" aria-pressed="false" disabled>Manage</button></div>
+            <div class="chips" id="shortcut-list" data-testid="shortcut-list" aria-label="Shared prompt shortcuts"></div>
+            <div class="shortcut-notice"><span id="shortcut-status" data-testid="shortcut-status" role="status">Loading shortcuts…</span><button class="link-btn" id="shortcut-retry" data-testid="shortcut-retry" hidden>Retry</button></div>
+            <div class="shortcut-form" id="shortcut-form" data-testid="shortcut-form" hidden>
+              <label for="shortcut-label">Label</label><input class="field" id="shortcut-label" data-testid="shortcut-label" maxlength="40" placeholder="e.g. Clear and warm" autocomplete="off">
+              <label for="shortcut-prompt">Instructions</label><textarea class="field" id="shortcut-prompt" data-testid="shortcut-prompt" maxlength="1000" placeholder="How should the message change?"></textarea>
+              <div class="inline-actions"><button class="secondary" id="shortcut-save" data-testid="shortcut-save" disabled>Save</button><button class="link-btn" id="shortcut-cancel" data-testid="shortcut-cancel">Cancel</button></div>
+            </div>
+          </div>
           <div class="attach-line"><button class="attach-btn" id="attach">＋ Attach</button><input class="file-input" data-testid="attachment-input" id="files" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,audio/*,video/*,.ogg,.opus,.m4a,.mp3,.mp4,.webm,.mov,.txt"></div>
           <div class="files" id="file-list"></div>
           <button class="primary" data-testid="generate" id="generate">${sparkle}<span id="generate-label">Generate suggestions</span></button>
@@ -99,6 +108,8 @@
   const pausedCaptures = new Map(), forgettingScopes = new Set();
   let calendarSelection = null;
   let calendarAccount = '', calendarAccountDirty = false, calendarAccountSaving = false;
+  let promptShortcuts = [], shortcutsLoaded = false, shortcutsLoading = false, shortcutsSaving = false, shortcutsManaging = false;
+  let shortcutsVersion = 0, shortcutsError = '';
   const messageFingerprint = messages => JSON.stringify(messages.map(m => [m.id,m.text,m.direction,m.sender,m.timestamp,m.kind]));
   const captureScope = (account, id) => JSON.stringify([account, id]);
   let selectionDraft = '', requestNumber = 0, contextVersion = 0, busy = false, debounce, fingerprint = '', fingerprintScope = '', resultContext = null, ownDraft = false;
@@ -131,6 +142,59 @@
       if (!response?.ok) throw new Error(response?.error || 'The extension did not respond. Reload WhatsApp Web after reloading the extension.');
       return response;
     } catch (error) { throw new Error(error.message.includes('Extension context invalidated') ? 'Extension updated. Reload WhatsApp Web to reconnect.' : error.message); }
+  }
+  function updateShortcutControls() {
+    const waiting = shortcutsLoading || shortcutsSaving;
+    $('#shortcut-add').disabled = waiting || !shortcutsLoaded || promptShortcuts.length >= 20;
+    $('#shortcut-manage').disabled = waiting || !shortcutsLoaded || !promptShortcuts.length;
+    $('#shortcut-manage').textContent = shortcutsManaging ? 'Done' : 'Manage';
+    $('#shortcut-manage').setAttribute('aria-pressed', String(shortcutsManaging));
+    $('#shortcut-save').disabled = waiting || !shortcutsLoaded || promptShortcuts.length >= 20 || !$('#shortcut-label').value.trim() || !$('#shortcut-prompt').value.trim();
+    $('#shortcut-save').textContent = shortcutsSaving ? 'Saving…' : 'Save';
+    for (const id of ['shortcut-label', 'shortcut-prompt', 'shortcut-cancel']) $('#' + id).disabled = shortcutsSaving;
+    const status = shortcutsError || (shortcutsLoading ? 'Loading shortcuts…' : !shortcutsLoaded ? '' : !promptShortcuts.length ? 'No shortcuts yet.' : promptShortcuts.length >= 20 ? '20 shortcuts maximum.' : '');
+    $('#shortcut-status').textContent = status;
+    $('#shortcut-status').classList.toggle('error', !!shortcutsError);
+    $('#shortcut-retry').hidden = !shortcutsError || shortcutsLoaded;
+    $('.shortcut-notice').hidden = !status;
+  }
+  function renderShortcuts() {
+    const list = $('#shortcut-list'); list.replaceChildren();
+    for (const shortcut of promptShortcuts) {
+      const item = el('span', 'shortcut-item'); item.dataset.shortcutId = shortcut.id;
+      const use = el('button', 'chip', shortcut.label); use.dataset.testid = 'shortcut-use'; use.title = shortcut.prompt;
+      use.addEventListener('click', userAction(() => { $('#prompt').value = shortcut.prompt; $('#prompt').focus(); }));
+      item.append(use);
+      if (shortcutsManaging) {
+        const remove = el('button', 'shortcut-remove', '×'); remove.dataset.testid = 'shortcut-delete'; remove.setAttribute('aria-label', `Delete ${shortcut.label}`); remove.disabled = shortcutsSaving;
+        remove.addEventListener('click', userAction(() => mutateShortcut('DELETE_PROMPT_SHORTCUT', { id: shortcut.id })));
+        item.append(remove);
+      }
+      list.append(item);
+    }
+    updateShortcutControls();
+  }
+  function applyShortcuts(value) {
+    if (!Array.isArray(value) || value.length > 20 || value.some(item => !item || typeof item.id !== 'string' || !item.id || typeof item.label !== 'string' || !item.label.trim() || item.label.length > 40 || typeof item.prompt !== 'string' || !item.prompt.trim() || item.prompt.length > 1000) || new Set(value.map(item => item.id)).size !== value.length) throw new Error('Shortcuts could not be loaded. Please retry.');
+    promptShortcuts = value.map(({ id, label, prompt }) => ({ id, label, prompt }));
+    shortcutsLoaded = true; shortcutsError = ''; renderShortcuts();
+  }
+  async function loadShortcuts() {
+    if (shortcutsLoading) return;
+    const version = shortcutsVersion; shortcutsLoading = true; shortcutsError = ''; updateShortcutControls();
+    try { const response = await send('GET_PROMPT_SHORTCUTS'); if (version === shortcutsVersion) applyShortcuts(response.promptShortcuts); }
+    catch (error) { if (version === shortcutsVersion) shortcutsError = error.message; }
+    finally { shortcutsLoading = false; updateShortcutControls(); }
+  }
+  async function mutateShortcut(type, data) {
+    if (shortcutsSaving || !shortcutsLoaded) return;
+    const version = shortcutsVersion; shortcutsSaving = true; shortcutsError = ''; renderShortcuts();
+    try {
+      const response = await send(type, data);
+      if (version === shortcutsVersion) applyShortcuts(response.promptShortcuts);
+      if (type === 'ADD_PROMPT_SHORTCUT') { $('#shortcut-label').value = ''; $('#shortcut-prompt').value = ''; $('#shortcut-form').hidden = true; }
+    } catch (error) { shortcutsError = error.message; }
+    finally { shortcutsSaving = false; renderShortcuts(); }
   }
   function setBusy(value) {
     busy = value; $('#generate').disabled = value; $('#find-tasks').disabled = value; $('#calendar-prepare').disabled = value;
@@ -360,7 +424,12 @@
   $('.launcher').onclick=userAction(()=>openPanel());$('#close').onclick=closePanel;$('#settings').onclick=userAction(()=>send('OPEN_SETTINGS'));
   $$('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
   $$('[data-mode]').forEach(b=>b.onclick=()=>{setMode(b.dataset.mode);$('#results').replaceChildren();});
-  $$('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;$('#prompt').focus();});
+  $('#shortcut-add').onclick=userAction(()=>{$('#shortcut-form').hidden=false;$('#shortcut-label').focus();});
+  $('#shortcut-manage').onclick=userAction(()=>{shortcutsManaging=!shortcutsManaging;renderShortcuts();});
+  $('#shortcut-cancel').onclick=userAction(()=>{$('#shortcut-form').hidden=true;$('#shortcut-label').value='';$('#shortcut-prompt').value='';shortcutsError='';updateShortcutControls();});
+  $('#shortcut-save').onclick=userAction(()=>mutateShortcut('ADD_PROMPT_SHORTCUT',{label:$('#shortcut-label').value.trim(),prompt:$('#shortcut-prompt').value.trim()}));
+  $('#shortcut-retry').onclick=userAction(loadShortcuts);
+  for(const id of ['shortcut-label','shortcut-prompt'])$('#'+id).addEventListener('input',updateShortcutControls);
   $('#source').addEventListener('input',()=>{if(!lastSelection?.text)ownDraft=true;});
   $('#generate').onclick=userAction(()=>generate(mode));$('#find-tasks').onclick=userAction(()=>generate('commitments'));
   $('#calendar-prepare').onclick=userAction(()=>generate('calendar'));
@@ -407,4 +476,6 @@
   document.addEventListener('threadlight-view-changed',()=>{if(adapter.getSnapshot().viewId!==currentViewId)safeRun(()=>refresh({force:true}))();});
   safeRun(()=>refresh({force:true}))();
   safeRun(async()=>{const response=await send('GET_CALENDAR_ACCOUNT');updateCalendarAccount(response.calendarAccount);})();
+  chrome.runtime.onMessage.addListener(message=>{if(message.type==='UI_PROMPT_SHORTCUTS_CHANGED'){shortcutsVersion++;try{applyShortcuts(message.promptShortcuts);}catch(error){shortcutsError=error.message;updateShortcutControls();}}});
+  loadShortcuts();
 })();

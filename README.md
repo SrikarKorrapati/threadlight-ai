@@ -25,6 +25,9 @@ Keep the terminal running while you use the assistant. Press Ctrl+C there to sto
 
 - **Select → prompt → suggestions.** Highlight a message or part of a draft, choose **Ask Threadlight**, write instructions such as “make it friendly but direct,” and generate three options. Right-click selected text also offers rewrite and calendar actions. Ctrl/Cmd+Enter submits the prompt.
 - **Suggest a reply.** Use the explicit button, optionally describe what you want to convey, and generate three responses. The current conversation, outgoing-message examples, accepted rewrites, and saved preferences supply context.
+- **Telugu–English suggestions.** Rewrites preserve meaningful Telugu words and romanized phrases while improving the English. Replies use your outgoing messages and accepted examples to match that chat's language mix. Tone changes do not request translation; an explicit instruction such as “English only” does. Language matching is model-generated and may need adjustment.
+- **Shared shortcuts.** Use **＋ Add** beside the shortcut chips to save a label and instructions. **Manage** exposes delete controls. The list is shared across every chat in this browser profile, including an intentionally empty list. Clicking a shortcut fills Instructions; it does not generate a response automatically.
+- **Move the launcher.** Drag the floating Threadlight button to a convenient position; it remembers its position in this browser profile. It stays above the composer and quoted-reply controls. When focused, arrow keys move it, Shift+arrow moves it farther, and Home restores its default position.
 - **Use a draft.** Insert or copy a suggestion. A selected portion of your draft can be replaced without changing the rest. If the chat or draft changes after generation, insertion is refused so your new text is not overwritten. The extension never clicks Send.
 - **Automatic conversation memory.** Loaded messages are captured and updated locally as you chat, including while the assistant panel is closed. Switching chats selects memory using the displayed contact or group name, within your configured WhatsApp account label. Scroll up to capture older loaded messages, or import a `.txt` export in Memory. For text imports, enter your exact sender name as it appears in the export. Names are normalized for whitespace and Unicode while preserving case. Matching names share history; renaming a contact selects a different history. The update preserves uniquely matching legacy histories; ambiguous legacy records remain stored without being merged.
 - **Calendar.** Select a message and choose Calendar to open its dedicated tab. Review/edit the date, time, location, and notes. Ask Threadlight opens the separate writing tools. Missing details stay unresolved until you supply them. **Review in Google Calendar** opens a prefilled event; you must press **Save** in Google Calendar. Choose a Google account email in Calendar and save it, or use the browser default. **Add / change** opens Google’s account chooser; sign in there, then save the desired email in Threadlight. This selects the account for the prefilled event without OAuth access. The extension does not silently create events or invite participants.
@@ -76,6 +79,8 @@ npm run test:browser
 npm run test:adapter
 npm run test:theme
 npm run test:layout
+npm run test:launcher
+npm run test:shortcuts
 npm run test:lifecycle
 npm run test:extension
 npm run test:setup
@@ -83,12 +88,13 @@ npm run test:setup
 
 Unit/integration tests cover contact/account isolation, deduplication, retention, key access, source timestamps, stale writes, calendar validation, real OpenAI request construction with injected responses, no-key errors, and FFmpeg preprocessing. Browser tests use isolated Chromium profiles and fictional WhatsApp-shaped fixtures; they do not access your personal browser or send messages. Model responses in test fixtures are explicitly simulated. Production code does not produce fake suggestions when an API key is missing.
 
-Live OpenAI text, image, audio, video, and calendar checks succeeded using fictional data. The extension was reloaded in a logged-in Brave session: automatic name selection, saved self-chat history, the removed phone/Progress UI, and the separate Calendar screen were verified. Automated checks include history updates while the panel is closed. Version 0.2.2 adds reserved layout space, Google account selection, clearer commitment cards, and fixes from a full architecture review. See `ARCHITECTURE.md` for the component boundaries and review findings. Generation and insertion in real WhatsApp remain unverified. See `VALIDATION.md` for the scope and remaining checks. The demonstration screenshot uses synthetic contacts and simulated suggestions.
+Live OpenAI text, image, audio, video, and calendar checks succeeded using fictional data. The extension was reloaded in a logged-in Brave session: automatic name selection, saved self-chat history, the removed phone/Progress UI, and the separate Calendar screen were verified. Automated checks include history updates while the panel is closed. Version 0.2.3 adds a draggable launcher, shared prompt shortcuts, and Telugu–English style instructions, with 172 relevant automated checks and fictional live language checks. The installed version and launcher drag were verified in Brave. See `ARCHITECTURE.md` for the component boundaries and review findings. Generation and insertion in real WhatsApp remain unverified. See `VALIDATION.md` for the scope and remaining checks. The demonstration screenshot uses synthetic contacts and simulated suggestions.
 
 ## Project map
 
 - `extension/adapter.js`: WhatsApp DOM and safe draft insertion.
 - `extension/content.js`, `content.css`: in-page assistant and selection actions.
+- `extension/layout.js`, `launcher.js`: reserved panel space and the movable launcher.
 - `extension/background.js`, `memory.js`: scoped persistence, legacy-history migration, and authenticated bridge calls.
 - `extension/options.*`: connection and account settings.
 - `server/`: loopback bridge, local setup UI, OpenAI requests, and media processing.

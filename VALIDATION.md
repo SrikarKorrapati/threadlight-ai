@@ -50,3 +50,19 @@ The complete production codebase was reviewed across UI/adapter/layout, backgrou
 Calendar account selection is covered by isolated UI and background URL tests. It does not add OAuth authorization. No Google Calendar event was saved and no Google account was changed during these checks.
 
 The 0.2.2 extension was reloaded in the logged-in Brave session and the local service restarted with the saved key still configured. Live geometry checks measured a 1,650px viewport with chat/composer ending at x=1,250px and the sidebar starting at x=1,250px. At an 866px viewport, chat/composer ended at y=472px and the bottom dock started at y=472px. Both checks reported zero overlap. The Calendar account field, Add/change, Save account, and browser-default controls were visibly present; the removed explanatory sentence was absent. No generation, WhatsApp send, Google sign-in change, or event save was triggered by these live checks.
+
+## Version 0.2.3 verification
+
+All **172 relevant automated checks** passed for this update:
+
+- 93 Node tests, including shared shortcut defaults, add/delete persistence, concurrent edits, empty lists, failed writes, launcher coordinates, and five language/payload regressions.
+- 34 existing interface checks.
+- 9 launcher checks using the manifest's full script order: drag versus click, persisted position across reloads/chats, viewport clamping, quoted-reply close-button accessibility, composer growth, keyboard movement/reset, and no generation/send side effects.
+- 9 shared-shortcut checks: safe label rendering, add/delete, global persistence, unfinished forms across chat switches, failed-write retry, limits, stale reads/broadcasts, and trusted actions without generation.
+- 12 appearance checks, 7 layout checks, 4 lifecycle checks, and 4 actual Manifest V3 checks.
+
+Syntax checks and `git diff --check` passed. The unchanged adapter and setup suites retain their recorded 0.2.2 results above; they were not rerun for this update. Fictional preview screenshots were refreshed.
+
+Five live OpenAI calls used fictional inputs: two romanized Telugu rewrites, one Telugu-script rewrite, one reply using mixed-language outgoing examples, and one explicit English-only translation. The mixed-language suggestions preserved Telugu expressions such as “sare ra” and “repu”; the translation request returned English-only suggestions. Some variants added redundant parenthetical wording despite instructions, so this is evidence of language preservation rather than a guarantee of perfect phrasing. No real chat content was submitted.
+
+Brave visibly showed extension version 0.2.3 after reload. In live WhatsApp Web, dragging moved the launcher without opening the panel. Quote-close accessibility and the shortcut editor were verified in isolated fixtures. The local service was restarted with the saved key configured, and its health endpoint reported ready. No WhatsApp messages were sent and no Calendar events were created.
