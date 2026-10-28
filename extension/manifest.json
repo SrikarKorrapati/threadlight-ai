@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Threadlight — Personal WhatsApp Copilot",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Select a message, ask for a rewrite, or suggest a reply with personal conversation memory.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "contextMenus"],

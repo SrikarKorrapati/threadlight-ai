@@ -231,14 +231,14 @@ export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = gl
     chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => { handleMessage(message, sender).then(sendResponse); return true; });
     chromeApi.runtime.onInstalled.addListener(() => {
       chromeApi.contextMenus.removeAll(() => {
-        for (const [mode, title] of [['rewrite', 'Improve selected English'], ['explain', 'Explain selected message'], ['calendar', 'Draft a calendar event']]) {
+        for (const [mode, title] of [['rewrite', 'Improve selected English'], ['calendar', 'Draft a calendar event']]) {
           chromeApi.contextMenus.create({ id: `wac-${mode}`, title: `Copilot: ${title}`, contexts: ['selection'], documentUrlPatterns: ['https://web.whatsapp.com/*'] });
         }
       });
     });
     chromeApi.contextMenus.onClicked.addListener((info, tab) => {
       const mode = String(info.menuItemId).replace(/^wac-/, '');
-      if (['rewrite', 'explain', 'calendar'].includes(mode)) void openUI(tab, mode, info.selectionText);
+      if (['rewrite', 'calendar'].includes(mode)) void openUI(tab, mode, info.selectionText);
     });
     chromeApi.action.onClicked.addListener(tab => { void openUI(tab, 'reply', undefined, true); });
     chromeApi.commands?.onCommand.addListener(async command => {
