@@ -1,6 +1,6 @@
 {
   "name": "threadlight-ai",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "A context-aware, multimodal WhatsApp Web writing assistant powered by OpenAI and local per-conversation memory.",
@@ -14,8 +14,10 @@
     "test:adapter": "node tests/browser-adapter-binding.mjs",
     "test:theme": "node tests/browser-theme.mjs",
     "test:layout": "node tests/browser-layout.mjs",
+    "test:launcher": "node tests/browser-launcher.mjs",
+    "test:shortcuts": "node tests/browser-shortcuts.mjs",
     "test:lifecycle": "node tests/browser-lifecycle.mjs",
-    "check": "node --check extension/adapter.js && node --check extension/commitments.js && node --check extension/layout.js && node --check extension/content.js && node --check extension/background.js && node --check extension/options.js",
+    "check": "node --check extension/adapter.js && node --check extension/commitments.js && node --check extension/launcher.js && node --check extension/layout.js && node --check extension/content.js && node --check extension/background.js && node --check extension/options.js",
     "test:extension": "node tests/browser-extension.mjs",
     "test:setup": "node tests/browser-setup.mjs"
   },

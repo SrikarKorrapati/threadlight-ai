@@ -12,7 +12,7 @@ async function check(name, run) {
   page.on('pageerror', error => errors.push(error.message));
   try {
     await page.goto(fixture.url); await page.evaluate(installMockRuntime, fixture.url);
-    for (const file of ['adapter.js', 'layout.js', 'content.js']) await page.addScriptTag({ path: path.join(projectRoot, 'extension', file) });
+    for (const file of ['adapter.js', 'commitments.js', 'layout.js', 'launcher.js', 'content.js']) await page.addScriptTag({ path: path.join(projectRoot, 'extension', file) });
     await page.waitForFunction(() => mockBridge.requests.some(request => request.type === 'CAPTURE'));
     await page.getByTestId('toggle').click();
     await run(page); passed++; console.log(`PASS ${name}`);

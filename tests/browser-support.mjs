@@ -30,6 +30,12 @@ export async function startFixture() {
 export function installMockRuntime(baseUrl) {
   const memories = new Map();
   const listeners = [];
+  const defaultShortcuts = [
+    { id:'default-friendly',label:'Friendly',prompt:'Make it friendly and natural.' },
+    { id:'default-shorter',label:'Shorter',prompt:'Make it shorter without losing the meaning.' },
+    { id:'default-professional',label:'Professional',prompt:'Make it professional without sounding stiff.' },
+  ];
+  const savedPreference = (key, fallback) => { try { const raw=localStorage.getItem(key);return raw===null?fallback:JSON.parse(raw); } catch { return fallback; } };
   const memory = chat => {
     const account=window.mockBridge?.accountLabel || 'Personal';
     const id = `${account==='Personal'?'':account+'|'}${chat?.id || 'unbound'}`;
@@ -38,7 +44,7 @@ export function installMockRuntime(baseUrl) {
   };
   const stats = { requests:0, accepted:0, acceptedCount:0, rewrites:0, wordsReviewed:0, categories:{}, recentFeedback:[], messageCount:0,capturedMessages:0,capturedTotal:0,incomingMessages:0,outgoingMessages:0,acceptedSuggestions:0,acceptedRewrites:0,copiedSuggestions:0,insertedSuggestions:0,feedbackCounts:{},commonIssues:[],pendingTasks:0,retentionRemovals:0,historyLimited:true };
   const state = chat => ({ ok: true, settings: { accountLabel: window.mockBridge.accountLabel, bridgeUrl: 'http://127.0.0.1:4318' }, memory: memory(chat), stats });
-  window.mockBridge = { requests: [], calendars: [], delay: 0, saveProfileDelay:0, accountLabel:'Personal', calendarNeedsClarification:false, calendarAccount:'', memories, dispatch(message) { listeners.forEach(listener => listener(message, {}, () => {})); } };
+  window.mockBridge = { requests: [], calendars: [], delay: 0, saveProfileDelay:0, accountLabel:'Personal', calendarNeedsClarification:false, calendarAccount:'', promptShortcuts:savedPreference('test-shortcuts',defaultShortcuts),launcherPosition:savedPreference('test-launcher-position',null),shortcutError:'',shortcutsDelay:0, memories, dispatch(message) { listeners.forEach(listener => listener(message, {}, () => {})); } };
   const handle = async message => {
     window.mockBridge.requests.push(JSON.parse(JSON.stringify(message)));
     switch (message.type) {
@@ -59,6 +65,28 @@ export function installMockRuntime(baseUrl) {
       case 'HEALTH': return { ok: true, ready: true, configured: true, model: 'test-double' };
       case 'OPEN_SETTINGS': return { ok: true };
       case 'GET_CALENDAR_ACCOUNT': return { ok: true, calendarAccount: window.mockBridge.calendarAccount };
+      case 'GET_PROMPT_SHORTCUTS': {
+        const promptShortcuts=JSON.parse(JSON.stringify(window.mockBridge.promptShortcuts));
+        if(window.mockBridge.shortcutsDelay)await new Promise(resolve=>setTimeout(resolve,window.mockBridge.shortcutsDelay));
+        return window.mockBridge.shortcutError?{ok:false,error:window.mockBridge.shortcutError}:{ok:true,promptShortcuts};
+      }
+      case 'ADD_PROMPT_SHORTCUT':
+      case 'DELETE_PROMPT_SHORTCUT': {
+        if(window.mockBridge.shortcutsDelay)await new Promise(resolve=>setTimeout(resolve,window.mockBridge.shortcutsDelay));
+        if(window.mockBridge.shortcutError)return {ok:false,error:window.mockBridge.shortcutError};
+        let next=window.mockBridge.promptShortcuts.map(item=>({...item}));
+        if(message.type==='DELETE_PROMPT_SHORTCUT')next=next.filter(item=>item.id!==message.id);
+        else {
+          if(typeof message.label!=='string'||!message.label.trim()||message.label.length>40||typeof message.prompt!=='string'||!message.prompt.trim()||message.prompt.length>1000)return {ok:false,error:'Enter a label and instructions within the limits.'};
+          if(next.length>=20)return {ok:false,error:'You can save up to 20 prompt shortcuts.'};
+          next.push({id:'custom-'+crypto.randomUUID(),label:message.label.trim(),prompt:message.prompt.trim()});
+        }
+        window.mockBridge.promptShortcuts=next;localStorage.setItem('test-shortcuts',JSON.stringify(next));
+        window.mockBridge.dispatch({type:'UI_PROMPT_SHORTCUTS_CHANGED',promptShortcuts:next});
+        return {ok:true,promptShortcuts:next};
+      }
+      case 'GET_LAUNCHER_POSITION': return {ok:true,position:window.mockBridge.launcherPosition};
+      case 'SAVE_LAUNCHER_POSITION': window.mockBridge.launcherPosition=message.position;localStorage.setItem('test-launcher-position',JSON.stringify(message.position));return {ok:true,position:message.position};
       case 'SAVE_CALENDAR_ACCOUNT': window.mockBridge.calendarAccount = message.calendarAccount || ''; return { ok: true, calendarAccount: window.mockBridge.calendarAccount };
       case 'OPEN_CALENDAR_ACCOUNT': return { ok: true, opened: true };
       case 'OPEN_CALENDAR': window.mockBridge.calendars.push({ ...message.event, calendarAccount: window.mockBridge.calendarAccount }); return { ok: true, opened: true };

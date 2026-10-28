@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createBackground, buildCalendarUrl, validateSettings, STORAGE_KEYS } from '../extension/background.js';
+import { createBackground, buildCalendarUrl, validateSettings, validatePromptShortcuts, DEFAULT_PROMPT_SHORTCUTS, STORAGE_KEYS } from '../extension/background.js';
 import { validateInput } from '../server/validation.mjs';
 import { createMemoryStore, captureMessages, scopeKey } from '../extension/memory.js';
 
@@ -357,4 +357,153 @@ test('fresh empty startup does not persist an unnecessary memory or migration ma
     const h = harness({ saved }); await h.background.ready;
     assert.equal(h.writes.length, 0); assert.deepEqual(h.data, saved);
   }
+});
+
+test('prompt shortcuts expose independent stable defaults without credentials or automatic requests', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  const first = await h.background.handleMessage({ type: 'GET_PROMPT_SHORTCUTS' }, content);
+  assert.deepEqual(first, { ok: true, promptShortcuts: DEFAULT_PROMPT_SHORTCUTS });
+  assert.deepEqual(first.promptShortcuts.map(item => item.id), ['default-friendly', 'default-shorter', 'default-professional']);
+  assert.equal(JSON.stringify(first).includes(paired.pairingToken), false);
+  first.promptShortcuts[0].label = 'Tampered returned copy'; first.promptShortcuts.pop();
+  assert.deepEqual((await h.background.handleMessage({ type: 'GET_PROMPT_SHORTCUTS' }, content)).promptShortcuts, DEFAULT_PROMPT_SHORTCUTS);
+  assert.equal(h.writes.length, 0); assert.equal(h.networkCalls(), 0); assert.equal(h.tabs.length, 0);
+});
+
+test('added prompt shortcuts are global and persist across chats, account/connection changes, and restart', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  const added = await h.background.handleMessage({ type: 'ADD_PROMPT_SHORTCUT', label: '  Warm  ', prompt: '  Use a warm tone.\nKeep it brief.  ', chat, accountLabel: 'Unrelated', pairingToken: 'overwrite-token' }, content);
+  assert.equal(added.ok, true);
+  const item = added.promptShortcuts.at(-1);
+  assert.match(item.id, /^shortcut-[a-f0-9-]{36}$/);
+  assert.equal(item.label, 'Warm'); assert.equal(item.prompt, 'Use a warm tone.\nKeep it brief.');
+  assert.deepEqual(h.broadcasts, [{ id: 1, value: { type: 'UI_PROMPT_SHORTCUTS_CHANGED', promptShortcuts: added.promptShortcuts } }]);
+  await h.background.handleMessage({ type: 'SAVE_CALENDAR_ACCOUNT', calendarAccount: 'calendar@example.com' }, content);
+  await h.background.handleMessage({ type: 'SAVE_SETTINGS', settings: { ...paired, accountLabel: 'Work', promptShortcuts: [] } }, options);
+  const otherChat = await h.background.handleMessage({ type: 'GET_PROMPT_SHORTCUTS', chat: { id: 'other', name: 'Other' }, accountLabel: 'Work' }, content);
+  assert.deepEqual(otherChat.promptShortcuts, added.promptShortcuts);
+  assert.equal(h.data[STORAGE_KEYS.settings].pairingToken, paired.pairingToken);
+  assert.equal(h.data[STORAGE_KEYS.settings].calendarAccount, 'calendar@example.com');
+  const restarted = harness({ saved: h.data });
+  assert.deepEqual((await restarted.background.handleMessage({ type: 'GET_PROMPT_SHORTCUTS' }, content)).promptShortcuts, added.promptShortcuts);
+  assert.equal(h.networkCalls(), 0);
+});
+
+test('concurrent shortcut add/delete operations preserve every operation instead of replacing a stale list', async () => {
+  let releaseWrite, writeStarted;
+  const started = new Promise(resolve => { writeStarted = resolve; });
+  const held = new Promise(resolve => { releaseWrite = resolve; });
+  let heldFirst = false;
+  const h = harness({ setImpl: async value => {
+    if (value[STORAGE_KEYS.settings] && !heldFirst) { heldFirst = true; writeStarted(); await held; }
+  } });
+  const first = h.background.handleMessage({ type: 'ADD_PROMPT_SHORTCUT', label: 'One', prompt: 'First instructions.' }, content);
+  await started;
+  const second = h.background.handleMessage({ type: 'ADD_PROMPT_SHORTCUT', label: 'Two', prompt: 'Second instructions.' }, content);
+  const deletion = h.background.handleMessage({ type: 'DELETE_PROMPT_SHORTCUT', id: 'default-shorter' }, content);
+  releaseWrite();
+  assert.ok((await Promise.all([first, second, deletion])).every(result => result.ok));
+  const final = (await h.background.handleMessage({ type: 'GET_PROMPT_SHORTCUTS' }, content)).promptShortcuts;
+  assert.deepEqual(final.map(item => item.label), ['Friendly', 'Professional', 'One', 'Two']);
+  assert.equal(new Set(final.map(item => item.id)).size, 4);
+  assert.deepEqual(h.data[STORAGE_KEYS.settings].promptShortcuts, final);
+  assert.equal(h.broadcasts.length, 3);
+});
+
+test('deleting every shortcut retains the empty list across restart and repeated deletes are harmless', async () => {
+  const h = harness();
+  await Promise.all(DEFAULT_PROMPT_SHORTCUTS.map(item => h.background.handleMessage({ type: 'DELETE_PROMPT_SHORTCUT', id: item.id }, content)));
+  assert.deepEqual(h.data[STORAGE_KEYS.settings].promptShortcuts, []);
+  const writes = h.writes.length, broadcasts = h.broadcasts.length;
+  assert.deepEqual(await h.background.handleMessage({ type: 'DELETE_PROMPT_SHORTCUT', id: 'default-friendly' }, content), { ok: true, promptShortcuts: [] });
+  assert.equal(h.writes.length, writes); assert.equal(h.broadcasts.length, broadcasts);
+  const restarted = harness({ saved: h.data });
+  assert.deepEqual(await restarted.background.handleMessage({ type: 'GET_PROMPT_SHORTCUTS' }, content), { ok: true, promptShortcuts: [] });
+  await restarted.background.handleMessage({ type: 'SAVE_SETTINGS', settings: paired }, options);
+  assert.deepEqual((await restarted.background.handleMessage({ type: 'GET_PROMPT_SHORTCUTS' }, content)).promptShortcuts, []);
+});
+
+test('shortcut validation bounds fields, rejects malformed persisted lists, and enforces the limit atomically', async () => {
+  const h = harness();
+  for (const fields of [{}, { label: '', prompt: 'Valid' }, { label: 'Valid', prompt: ' ' }, { label: null, prompt: 'Valid' }, { label: 'x'.repeat(41), prompt: 'Valid' }, { label: 'Valid', prompt: 'x'.repeat(1001) }, { label: 'Bad\nname', prompt: 'Valid' }, { label: 'Valid', prompt: 'Nul\0text' }]) {
+    assert.equal((await h.background.handleMessage({ type: 'ADD_PROMPT_SHORTCUT', ...fields }, content)).ok, false);
+  }
+  for (const id of [undefined, '', {}, 'not an id', '../default-friendly', 'x'.repeat(81)]) {
+    assert.equal((await h.background.handleMessage({ type: 'DELETE_PROMPT_SHORTCUT', id }, content)).ok, false);
+  }
+  assert.equal(h.writes.length, 0); assert.equal(h.broadcasts.length, 0);
+  for (const value of [null, {}, [null], [{ ...DEFAULT_PROMPT_SHORTCUTS[0], id: '__proto__' }], [DEFAULT_PROMPT_SHORTCUTS[0], DEFAULT_PROMPT_SHORTCUTS[0]], Array(21).fill(DEFAULT_PROMPT_SHORTCUTS[0])]) assert.throws(() => validatePromptShortcuts(value));
+  const full = Array.from({ length: 19 }, (_, index) => ({ id: `saved-${index}`, label: `Item ${index}`, prompt: 'Instructions.' }));
+  const limited = harness({ saved: { [STORAGE_KEYS.settings]: { ...paired, promptShortcuts: full } } });
+  const results = await Promise.all(['First', 'Second'].map(label => limited.background.handleMessage({ type: 'ADD_PROMPT_SHORTCUT', label, prompt: 'Instructions.' }, content)));
+  assert.deepEqual(results.map(result => result.ok), [true, false]);
+  assert.equal(limited.data[STORAGE_KEYS.settings].promptShortcuts.length, 20);
+});
+
+test('failed shortcut persistence leaves the list and broadcasts unchanged and later operations recover', async () => {
+  const h = harness(); await h.background.ready;
+  const save = h.chromeApi.storage.local.set;
+  h.chromeApi.storage.local.set = async () => { throw new Error('Preference storage unavailable'); };
+  for (const message of [{ type: 'ADD_PROMPT_SHORTCUT', label: 'Unsaved', prompt: 'Do not save.' }, { type: 'DELETE_PROMPT_SHORTCUT', id: 'default-friendly' }]) {
+    const result = await h.background.handleMessage(message, content);
+    assert.equal(result.ok, false); assert.match(result.error, /storage unavailable/);
+  }
+  assert.deepEqual((await h.background.handleMessage({ type: 'GET_PROMPT_SHORTCUTS' }, content)).promptShortcuts, DEFAULT_PROMPT_SHORTCUTS);
+  assert.equal(h.broadcasts.length, 0);
+  h.chromeApi.storage.local.set = save;
+  assert.equal((await h.background.handleMessage({ type: 'ADD_PROMPT_SHORTCUT', label: 'Saved', prompt: 'Now save.' }, content)).ok, true);
+});
+
+test('launcher position is sanitized, global, separate from settings, persistent, and resettable without broadcasts', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  assert.deepEqual(await h.background.handleMessage({ type: 'GET_LAUNCHER_POSITION' }, content), { ok: true, position: null });
+  const saved = await h.background.handleMessage({ type: 'SAVE_LAUNCHER_POSITION', position: { x: .25, y: .8, secret: paired.pairingToken }, accountLabel: 'Other' }, content);
+  assert.deepEqual(saved, { ok: true, position: { x: .25, y: .8 } });
+  assert.deepEqual(h.data[STORAGE_KEYS.launcher], { x: .25, y: .8 });
+  assert.equal(JSON.stringify(saved).includes(paired.pairingToken), false);
+  saved.position.x = 0;
+  assert.equal((await h.background.handleMessage({ type: 'GET_LAUNCHER_POSITION' }, content)).position.x, .25);
+  assert.equal(h.broadcasts.length, 0);
+  await h.background.handleMessage({ type: 'SAVE_SETTINGS', settings: { ...paired, accountLabel: 'Work' } }, options);
+  const restarted = harness({ saved: h.data });
+  assert.deepEqual(await restarted.background.handleMessage({ type: 'GET_LAUNCHER_POSITION' }, content), { ok: true, position: { x: .25, y: .8 } });
+  assert.deepEqual(await restarted.background.handleMessage({ type: 'SAVE_LAUNCHER_POSITION', position: null }, content), { ok: true, position: null });
+  assert.equal(restarted.data[STORAGE_KEYS.launcher], null);
+  assert.equal(restarted.broadcasts.length, 0); assert.equal(h.networkCalls(), 0);
+});
+
+test('launcher validation rejects invalid writes and safely falls back for invalid saved positions', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.launcher]: { x: .4, y: .6 } } });
+  for (const position of [undefined, {}, [], 'middle', { x: .5 }, { x: '0.2', y: .4 }, { x: -.1, y: .3 }, { x: .2, y: 1.01 }, { x: NaN, y: .3 }, { x: .2, y: Infinity }]) {
+    assert.equal((await h.background.handleMessage({ type: 'SAVE_LAUNCHER_POSITION', position }, content)).ok, false);
+  }
+  assert.equal(h.writes.length, 0); assert.equal(h.broadcasts.length, 0);
+  assert.deepEqual((await h.background.handleMessage({ type: 'GET_LAUNCHER_POSITION' }, content)).position, { x: .4, y: .6 });
+  for (const position of [{ x: -2, y: 3 }, 'bad', { pairingToken: paired.pairingToken }]) {
+    const restarted = harness({ saved: { [STORAGE_KEYS.launcher]: position } });
+    assert.deepEqual(await restarted.background.handleMessage({ type: 'GET_LAUNCHER_POSITION' }, content), { ok: true, position: null });
+  }
+});
+
+test('failed launcher persistence leaves its previous saved position unchanged', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.launcher]: { x: 0, y: 1 } }, setImpl: async () => { throw new Error('Storage failed'); } });
+  const failed = await h.background.handleMessage({ type: 'SAVE_LAUNCHER_POSITION', position: { x: 1, y: 0 } }, content);
+  assert.equal(failed.ok, false);
+  assert.deepEqual((await h.background.handleMessage({ type: 'GET_LAUNCHER_POSITION' }, content)).position, { x: 0, y: 1 });
+  assert.deepEqual(h.data[STORAGE_KEYS.launcher], { x: 0, y: 1 });
+  assert.equal(h.broadcasts.length, 0);
+});
+
+test('new global preference endpoints reject untrusted pages and do not send unused shortcuts to the model', async () => {
+  let body;
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: { ...paired, promptShortcuts: [{ id: 'private-prompt', label: 'Private', prompt: 'Private master instructions not selected.' }] } }, fetchImpl: async (_url, init) => {
+    body = JSON.parse(init.body); return { ok: true, json: async () => ({ ok: true, result: aiResult() }) };
+  } });
+  for (const type of ['GET_PROMPT_SHORTCUTS', 'ADD_PROMPT_SHORTCUT', 'DELETE_PROMPT_SHORTCUT', 'GET_LAUNCHER_POSITION', 'SAVE_LAUNCHER_POSITION']) {
+    assert.equal((await h.background.handleMessage({ type, id: 'private-prompt', label: 'Bad', prompt: 'Bad', position: { x: 0, y: 0 } }, { ...content, url: 'https://evil.example' })).ok, false);
+  }
+  assert.equal(h.writes.length, 0); assert.equal(h.networkCalls(), 0);
+  assert.equal((await h.background.handleMessage(request(), content)).ok, true);
+  assert.equal(JSON.stringify(body).includes('Private master instructions not selected.'), false);
+  assert.equal(Object.hasOwn(body, 'promptShortcuts'), false);
 });
