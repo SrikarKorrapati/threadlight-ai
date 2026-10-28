@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackground, buildCalendarUrl, validateSettings, STORAGE_KEYS } from '../extension/background.js';
 import { validateInput } from '../server/validation.mjs';
+import { createMemoryStore, captureMessages, scopeKey } from '../extension/memory.js';
 
 const chat = { id: 'person@c.us', name: 'Person' };
 const extensionId = 'a'.repeat(32);
@@ -10,23 +11,24 @@ const options = { id: extensionId, url: `chrome-extension://${extensionId}/optio
 const aiResult = () => ({ suggestions: [], feedback: [], commitments: [], explanation: '', event: null, mediaNotes: [] });
 const request = () => ({ type: 'GENERATE', chat, mode: 'reply', text: '', prompt: '', attachments: [], now: '2026-10-28T09:00:00Z', timeZone: 'Asia/Kolkata' });
 
-function harness({ saved = {}, fetchImpl, timers } = {}) {
+function harness({ saved = {}, fetchImpl, timers, setImpl } = {}) {
   const data = structuredClone(saved);
   const tabs = [];
   const broadcasts = [];
   const accesses = [];
+  const writes = [];
   let networkCalls = 0;
   const chromeApi = {
     runtime: { id: extensionId, getURL: path => `chrome-extension://${extensionId}/${path}`, openOptionsPage: async () => {} },
     storage: {
-      local: { setAccessLevel: async value => accesses.push(['local', value]), get: async () => structuredClone(data), set: async value => Object.assign(data, structuredClone(value)) },
+      local: { setAccessLevel: async value => accesses.push(['local', value]), get: async () => structuredClone(data), set: async value => { writes.push(structuredClone(value)); if (setImpl) await setImpl(value); Object.assign(data, structuredClone(value)); } },
       session: { setAccessLevel: async value => accesses.push(['session', value]) },
     },
     tabs: { create: async value => tabs.push(value), query: async () => [{ id: 1 }], sendMessage: async (id, value) => broadcasts.push({ id, value }) },
   };
   const fetcher = async (...args) => { networkCalls++; return fetchImpl ? fetchImpl(...args) : { ok: true, json: async () => ({ ok: true, result: aiResult() }) }; };
   const background = createBackground({ chromeApi, fetchImpl: fetcher, ...(timers ? { timers } : {}) });
-  return { background, data, tabs, broadcasts, accesses, networkCalls: () => networkCalls, chromeApi };
+  return { background, data, tabs, broadcasts, accesses, writes, networkCalls: () => networkCalls, chromeApi };
 }
 const paired = { bridgeUrl: 'http://127.0.0.1:4318', pairingToken: 'secret-pairing-token', accountLabel: 'Personal' };
 
@@ -211,5 +213,62 @@ test('request-only MV3 keepalive and timeout timers are cleared after success an
     assert.deepEqual(intervalDelays, [20000]);
     assert.equal(platformCalls, 1);
     assert.equal(active.size, 0);
+  }
+});
+
+const legacyPerson = { id: 'wa:legacy-person@c.us', name: 'Person' };
+const namedPerson = { id: 'name:Person', name: 'Person' };
+function oldNameStore({ destination = false } = {}) {
+  const store = createMemoryStore();
+  captureMessages(store, 'Personal', legacyPerson, [{ id: 'legacy-message', text: 'Saved before name-based identity', direction: 'out' }]);
+  if (destination) captureMessages(store, 'Personal', namedPerson, [{ id: 'new-message', text: 'Saved under displayed name', direction: 'out' }]);
+  return store;
+}
+
+test('startup serves name history only after migration and marker are persisted', async () => {
+  let releaseWrite, writeStarted;
+  const started = new Promise(resolve => { writeStarted = resolve; });
+  const held = new Promise(resolve => { releaseWrite = resolve; });
+  const h = harness({ saved: { [STORAGE_KEYS.memory]: oldNameStore() }, setImpl: async () => { writeStarted(); await held; } });
+  let responseFinished = false;
+  const response = h.background.handleMessage({ type: 'GET_STATE', chat: namedPerson }, content).then(value => { responseFinished = true; return value; });
+  await started; await new Promise(resolve => setImmediate(resolve));
+  assert.equal(responseFinished, false, 'No response may expose unpersisted migrated state');
+  assert.equal(h.data[STORAGE_KEYS.memory].nameIdentityVersion, undefined);
+  releaseWrite(); await h.background.ready;
+  const state = await response;
+  assert.equal(state.ok, true); assert.equal(state.memory.messages[0].text, 'Saved before name-based identity');
+  assert.equal(h.data[STORAGE_KEYS.memory].nameIdentityVersion, 1);
+  assert.equal(Object.hasOwn(h.data[STORAGE_KEYS.memory].chats, scopeKey('Personal', legacyPerson)), false);
+  assert.equal(h.writes.length, 1); assert.equal(h.networkCalls(), 0);
+});
+
+test('failed startup migration persistence rejects readiness and never exposes migrated memory', async () => {
+  const original = oldNameStore();
+  const h = harness({ saved: { [STORAGE_KEYS.memory]: original }, setImpl: async () => { throw new Error('Migration storage failed'); } });
+  await assert.rejects(h.background.ready, /Migration storage failed/);
+  for (const message of [{ type: 'GET_STATE', chat: namedPerson }, { type: 'CAPTURE', chat: namedPerson, messages: [] }, request()]) {
+    const result = await h.background.handleMessage(message, content);
+    assert.equal(result.ok, false); assert.match(result.error, /Migration storage failed/); assert.equal('memory' in result, false);
+  }
+  assert.deepEqual(h.data[STORAGE_KEYS.memory], original);
+  assert.equal(h.writes.length, 1); assert.equal(h.networkCalls(), 0);
+});
+
+test('startup marker prevents preserved legacy records reappearing after forget and restart', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.memory]: oldNameStore({ destination: true }) } });
+  await h.background.ready; assert.equal(h.data[STORAGE_KEYS.memory].nameIdentityVersion, 1);
+  assert.equal((await h.background.handleMessage({ type: 'FORGET_CHAT', chat: namedPerson }, content)).ok, true);
+  const restarted = harness({ saved: h.data });
+  const state = await restarted.background.handleMessage({ type: 'GET_STATE', chat: namedPerson }, content);
+  assert.equal(state.ok, true); assert.equal(state.memory.messages.length, 0);
+  assert.ok(restarted.data[STORAGE_KEYS.memory].chats[scopeKey('Personal', legacyPerson)]);
+  assert.equal(restarted.writes.length, 0);
+});
+
+test('fresh empty startup does not persist an unnecessary memory or migration marker', async () => {
+  for (const saved of [{}, { [STORAGE_KEYS.memory]: createMemoryStore() }]) {
+    const h = harness({ saved }); await h.background.ready;
+    assert.equal(h.writes.length, 0); assert.deepEqual(h.data, saved);
   }
 });

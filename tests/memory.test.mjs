@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LIMITS, createMemoryStore, loadMemoryStore, captureMessages, getChatState, saveProfile, recordAcceptance, buildGenerationContext, addCommitments, updateTask, forgetChat, scopeKey } from '../extension/memory.js';
+import { LIMITS, createMemoryStore, loadMemoryStore, captureMessages, getChatState, saveProfile, recordAcceptance, buildGenerationContext, addCommitments, updateTask, forgetChat, scopeKey, migrateNameIdentityStore } from '../extension/memory.js';
 
 const chat = { id: '1111111111@c.us', name: 'Sam' };
 const other = { id: '2222222222@c.us', name: 'Sam' };
 const message = (id, text = 'Hello', direction = 'in', timestamp = '2026-10-28T09:00:00Z') => ({ id, text, direction, sender: 'Sam', timestamp, kind: 'text' });
 
-test('same display name and different account namespaces never share history, profiles, or statistics', () => {
+test('different stored conversation IDs and accounts isolate history, profiles, and statistics', () => {
   const store = createMemoryStore();
   captureMessages(store, 'Personal', chat, [message('one', 'Private appointment')]);
   saveProfile(store, 'Personal', chat, 'Use a warm tone.');
@@ -123,4 +123,93 @@ test('context retrieval searches older retained messages under the request chara
   assert.ok(context.messages.some(item => item.id === '0'));
   assert.ok(context.messages.some(item => item.id === '109'));
   assert.ok(context.messages.reduce((sum, item) => sum + item.text.length, 0) <= 280000);
+});
+
+test('name migration preserves the entire legacy record while updating only chat identity', () => {
+  const store = createMemoryStore(), legacy = { id: 'wa:19995550111@c.us', name: 'Jose\u0301   Li' };
+  captureMessages(store, 'Personal', legacy, [message('old-one', 'Original message', 'out')]);
+  saveProfile(store, 'Personal', legacy, 'Keep my personal tone.');
+  recordAcceptance(store, 'Personal', legacy, { original: 'I has', suggestion: { text: 'I have' }, action: 'insert', feedback: [{ category: 'Grammar', original: 'I has', improved: 'I have', reason: 'Agreement' }] });
+  const tasks = addCommitments(store, 'Personal', legacy, [{ title: 'Send report', due: '2026-10-30', owner: 'Me', source: 'I will send it.' }]);
+  updateTask(store, 'Personal', legacy, tasks.memory.tasks[0].id, 'done');
+  const oldKey = scopeKey('Personal', legacy);
+  store.chats[oldKey].customMetadata = { retained: ['everything'] }; store.chats[oldKey].chat.color = 'teal';
+  const original = structuredClone(store), target = { id: 'name:José Li', name: 'José Li' };
+  const result = migrateNameIdentityStore(store);
+  assert.equal(result.changed, true); assert.equal(result.migrated, 1); assert.equal(result.store.nameIdentityVersion, 1);
+  assert.deepEqual(store, original, 'Migration must not mutate the loaded/persisted object');
+  assert.equal(Object.hasOwn(result.store.chats, oldKey), false);
+  assert.deepEqual(result.store.chats[scopeKey('Personal', target)], { ...original.chats[oldKey], chat: { ...original.chats[oldKey].chat, ...target } });
+  result.store.chats[scopeKey('Personal', target)].customMetadata.retained.push('new');
+  assert.deepEqual(original.chats[oldKey].customMetadata.retained, ['everything']);
+});
+
+test('name migration respects accounts, normalized names, exact case, and known legacy prefixes', () => {
+  const store = createMemoryStore();
+  const entries = [
+    ['Personal', { id: 'wa:one', name: 'Alex   Rao' }, 'Personal history'],
+    ['Work', { id: 'manual:phone:+12025550142', name: 'Alex Rao' }, 'Work history'],
+    ['Personal', { id: 'wa:two', name: 'alex Rao' }, 'Case-sensitive history'],
+    ['Personal', { id: 'custom-unrelated-id', name: 'Taylor' }, 'Unrelated format'],
+  ];
+  for (const [account, person, body] of entries) captureMessages(store, account, person, [message('one', body)]);
+  const result = migrateNameIdentityStore(store);
+  assert.equal(result.migrated, 3);
+  assert.equal(getChatState(result.store, 'Personal', { id: 'name:Alex Rao', name: 'Alex Rao' }).memory.messages[0].text, 'Personal history');
+  assert.equal(getChatState(result.store, 'Work', { id: 'name:Alex Rao', name: 'Alex Rao' }).memory.messages[0].text, 'Work history');
+  assert.equal(getChatState(result.store, 'Personal', { id: 'name:alex Rao', name: 'alex Rao' }).memory.messages[0].text, 'Case-sensitive history');
+  assert.ok(result.store.chats[scopeKey('Personal', entries[3][1])]);
+  assert.equal(Object.hasOwn(result.store.chats, scopeKey('Personal', { id: 'name:Taylor', name: 'Taylor' })), false);
+});
+
+test('ambiguous normalized names and existing destinations preserve all original records', () => {
+  const store = createMemoryStore();
+  const entries = [
+    { id: 'wa:first-jose', name: 'Jose\u0301 Li' }, { id: 'manual:phone:+12025550142', name: 'José   Li' },
+    { id: 'wa:sam', name: 'Sam' }, { id: 'name:Sam', name: 'Sam' },
+    { id: 'wa:taylor', name: 'Taylor' }, { id: 'custom-taylor', name: 'Taylor' },
+  ];
+  for (const person of entries) captureMessages(store, 'Personal', person, [message(person.id, 'Preserve ' + person.id)]);
+  const before = structuredClone(store), result = migrateNameIdentityStore(store);
+  assert.equal(result.migrated, 0); assert.deepEqual(result.store.chats, before.chats);
+  assert.equal(result.store.nameIdentityVersion, 1, 'Skipped records must still be marked as considered');
+});
+
+test('migration marker survives forgetting and prevents re-adopting retained history on restart', () => {
+  const store = createMemoryStore(), legacy = { id: 'wa:old', name: 'Sam' }, target = { id: 'name:Sam', name: 'Sam' };
+  captureMessages(store, 'Personal', legacy, [message('old', 'Old private note')]);
+  captureMessages(store, 'Personal', target, [message('current', 'Current note')]);
+  const initial = migrateNameIdentityStore(store); assert.equal(initial.migrated, 0);
+  forgetChat(initial.store, 'Personal', target);
+  const restarted = migrateNameIdentityStore(JSON.parse(JSON.stringify(initial.store)));
+  assert.equal(restarted.changed, false); assert.equal(restarted.migrated, 0);
+  assert.equal(getChatState(restarted.store, 'Personal', target).memory.messages.length, 0);
+  assert.equal(getChatState(restarted.store, 'Personal', legacy).memory.messages[0].text, 'Old private note');
+});
+
+test('untouched empty stores need no write and completed migration is idempotent', () => {
+  for (const input of [undefined, createMemoryStore()]) {
+    const result = migrateNameIdentityStore(input);
+    assert.equal(result.changed, false); assert.equal(result.migrated, 0); assert.equal(Object.hasOwn(result.store, 'nameIdentityVersion'), false);
+    if (input) assert.notEqual(result.store, input);
+  }
+  const store = createMemoryStore(), person = { id: 'wa:old', name: 'Sam' };
+  captureMessages(store, 'Personal', person, [message('one')]);
+  const initial = migrateNameIdentityStore(store), second = migrateNameIdentityStore(initial.store);
+  assert.equal(second.changed, false); assert.deepEqual(second.store, initial.store);
+  forgetChat(second.store, 'Personal', { id: 'name:Sam', name: 'Sam' });
+  const empty = migrateNameIdentityStore(second.store);
+  assert.equal(empty.changed, false); assert.equal(empty.store.nameIdentityVersion, 1);
+});
+
+test('migration groups collisions after the same Unicode normalization and 160-character cap as live names', () => {
+  const store = createMemoryStore(), prefix = '1'.repeat(159);
+  const first = { id: 'wa:first', name: prefix + '\u0344' };
+  const second = { id: 'wa:second', name: prefix + '\u0308' };
+  captureMessages(store, 'Personal', first, [message('one')]);
+  captureMessages(store, 'Personal', second, [message('two')]);
+  const result = migrateNameIdentityStore(store);
+  assert.equal(result.migrated, 0); assert.deepEqual(result.store.chats, store.chats);
+  assert.equal(result.store.nameIdentityVersion, 1);
+  assert.throws(() => migrateNameIdentityStore({ version: 1, chats: {}, nameIdentityVersion: 2 }), /unsupported/);
 });
