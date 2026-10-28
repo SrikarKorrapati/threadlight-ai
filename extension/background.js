@@ -1,7 +1,7 @@
 import { createMemoryStore, migrateNameIdentityStore, validateChat, scopeKey, getChatState, captureMessages, saveProfile, recordAcceptance, addCommitments, updateTask, forgetChat, buildGenerationContext } from './memory.js';
 
 export const STORAGE_KEYS = { settings: 'wac.settings.v1', memory: 'wac.memory.v1' };
-export const DEFAULT_SETTINGS = Object.freeze({ bridgeUrl: 'http://127.0.0.1:4318', pairingToken: '', accountLabel: 'Personal' });
+export const DEFAULT_SETTINGS = Object.freeze({ bridgeUrl: 'http://127.0.0.1:4318', pairingToken: '', accountLabel: 'Personal', calendarAccount: '' });
 const MODES = new Set(['rewrite', 'reply', 'explain', 'calendar', 'commitments']);
 const ACCOUNT_SCOPED_MUTATIONS = new Set(['CAPTURE', 'IMPORT_MESSAGES', 'SAVE_PROFILE', 'ACCEPT', 'UPDATE_TASK', 'FORGET_CHAT']);
 const OPTIONS_PATH = 'options.html';
@@ -24,7 +24,14 @@ export function validateZonedISO(value, name = 'Date') {
   if (+m < 1 || +m > 12 || +d < 1 || +d > lastDay || +h > 23 || +min > 59 || +sec > 59 || +offH > 14 || +offM > 59 || (+offH === 14 && +offM !== 0) || !Number.isFinite(Date.parse(value))) throw new Error(`${name} is not a valid date and time.`);
   return value;
 }
-export function buildCalendarUrl(event) {
+export function validateCalendarAccount(value = '') {
+  const email = field(value, 254, 'Google account email').trim().toLowerCase();
+  if (email && (!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i.test(email) || email.split('@')[0].length > 64)) {
+    throw new Error('Enter a valid Google account email, or leave it empty for the browser default.');
+  }
+  return email;
+}
+export function buildCalendarUrl(event, calendarAccount = '') {
   if (!event || typeof event !== 'object' || event.needsClarification) throw new Error('Resolve the event questions before opening Calendar.');
   const title = field(event.title, 300, 'Event title', true).trim();
   const start = validateZonedISO(event.start, 'Start time');
@@ -36,6 +43,8 @@ export function buildCalendarUrl(event) {
   const compact = date => new Date(date).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const url = new URL('https://calendar.google.com/calendar/render');
   url.search = new URLSearchParams({ action: 'TEMPLATE', text: title, dates: `${compact(start)}/${compact(end)}`, ctz: timeZone, location, details: description }).toString();
+  const email = validateCalendarAccount(calendarAccount);
+  if (email) url.searchParams.set('authuser', email);
   return url.toString();
 }
 export function validateSettings(input) {
@@ -45,7 +54,7 @@ export function validateSettings(input) {
   if (parsed.origin !== 'http://127.0.0.1:4318' || parsed.username || parsed.password || !['', '/'].includes(parsed.pathname) || parsed.search || parsed.hash) throw new Error('The bridge must use http://127.0.0.1:4318.');
   const pairingToken = field(input.pairingToken || '', 512, 'Pairing token').trim();
   if (pairingToken && !/^[A-Za-z0-9_.~+-]+$/.test(pairingToken)) throw new Error('The pairing token contains invalid characters.');
-  return { bridgeUrl: parsed.origin, pairingToken, accountLabel: field(input.accountLabel, 120, 'Account label', true).trim() };
+  return { bridgeUrl: parsed.origin, pairingToken, accountLabel: field(input.accountLabel, 120, 'Account label', true).trim(), calendarAccount: validateCalendarAccount(input.calendarAccount) };
 }
 export function senderKind(sender, runtime) {
   if (!sender || sender.id !== runtime.id) return null;
@@ -92,11 +101,11 @@ export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = gl
     if (migration.changed) await chromeApi.storage.local.set({ [STORAGE_KEYS.memory]: migration.store });
     memory = migration.store;
   })();
-  const publicSettings = () => ({ accountLabel: settings.accountLabel, bridgeUrl: settings.bridgeUrl });
+  const publicSettings = () => ({ accountLabel: settings.accountLabel, bridgeUrl: settings.bridgeUrl, calendarAccount: settings.calendarAccount });
   function checkAccount(message) {
     if (message.accountLabel !== undefined && message.accountLabel !== settings.accountLabel) throw new Error('The active account changed. Refresh this conversation before continuing.');
   }
-  async function broadcastAccountChange() {
+  async function broadcastToWhatsApp(message) {
     try {
       const tabs = await chromeApi.tabs.query({ url: 'https://web.whatsapp.com/*' });
       for (const tab of tabs) {
@@ -104,7 +113,7 @@ export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = gl
         try {
           // Do not wait for a response: the receiving UI may immediately request
           // fresh state, which uses this same serialized storage queue.
-          const delivered = chromeApi.tabs.sendMessage(tab.id, { type: 'UI_ACCOUNT_CHANGED' });
+          const delivered = chromeApi.tabs.sendMessage(tab.id, message);
           delivered?.catch(() => {});
         } catch { /* A tab may close or have no content script yet. */ }
       }
@@ -205,15 +214,33 @@ export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = gl
         case 'SAVE_SETTINGS': {
           if (kind !== 'options') throw new Error('Only the extension Settings page may change settings.');
           const next = validateSettings(message.settings);
+          // The connection form does not edit the independent Calendar choice.
+          next.calendarAccount = settings.calendarAccount;
           await chromeApi.storage.local.set({ [STORAGE_KEYS.settings]: next });
           const accountChanged = next.accountLabel !== settings.accountLabel;
           settings = next;
-          if (accountChanged) await broadcastAccountChange();
+          if (accountChanged) await broadcastToWhatsApp({ type: 'UI_ACCOUNT_CHANGED' });
           return { ok: true, settings: { ...settings } };
+        }
+        case 'GET_CALENDAR_ACCOUNT': return { ok: true, calendarAccount: settings.calendarAccount };
+        case 'SAVE_CALENDAR_ACCOUNT': {
+          const calendarAccount = validateCalendarAccount(field(message.calendarAccount, 254, 'Google account email'));
+          const next = { ...settings, calendarAccount };
+          await chromeApi.storage.local.set({ [STORAGE_KEYS.settings]: next });
+          settings = next;
+          await broadcastToWhatsApp({ type: 'UI_CALENDAR_ACCOUNT_CHANGED', calendarAccount });
+          return { ok: true, calendarAccount };
+        }
+        case 'OPEN_CALENDAR_ACCOUNT': {
+          // Account management never carries a selected message or event details.
+          const url = new URL('https://accounts.google.com/AccountChooser');
+          url.searchParams.set('continue', 'https://calendar.google.com/calendar/');
+          await chromeApi.tabs.create({ url: url.toString() });
+          return { ok: true, opened: true };
         }
         case 'OPEN_SETTINGS': await chromeApi.runtime.openOptionsPage(); return { ok: true };
         case 'OPEN_CALENDAR': {
-          const url = buildCalendarUrl(message.event);
+          const url = buildCalendarUrl(message.event, settings.calendarAccount);
           await chromeApi.tabs.create({ url });
           return { ok: true, opened: true };
         }

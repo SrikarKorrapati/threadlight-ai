@@ -30,17 +30,25 @@ export async function openConfig(path = DEFAULT_CONFIG_PATH, env = process.env) 
     config = next;
   };
   await persist(config);
+  // Setup tabs may save settings and rotate pairing concurrently. Build each
+  // update from the last committed state so neither operation restores stale data.
+  let pending = Promise.resolve();
+  const update = operation => {
+    const result = pending.then(operation);
+    pending = result.catch(() => {});
+    return result;
+  };
   return {
     get: () => ({ ...config, apiKey: config.apiKey || env.OPENAI_API_KEY || '' }),
     public: () => ({ ready: !!(config.apiKey || env.OPENAI_API_KEY), model: config.model, transcriptionModel: config.transcriptionModel, keySource: config.apiKey ? 'local' : env.OPENAI_API_KEY ? 'environment' : 'none' }),
-    save: async changes => {
+    save: changes => update(async () => {
       const next = { ...config };
       if (changes.clearKey) next.apiKey = '';
       else if (changes.apiKey) next.apiKey = changes.apiKey;
       if (changes.model) next.model = changes.model;
       if (changes.transcriptionModel) next.transcriptionModel = changes.transcriptionModel;
       await persist(next);
-    },
-    rotate: async () => { await persist({ ...config, pairingToken: makeToken() }); return config.pairingToken; },
+    }),
+    rotate: () => update(async () => { await persist({ ...config, pairingToken: makeToken() }); return config.pairingToken; }),
   };
 }

@@ -121,6 +121,8 @@ try {
   await applyPageTheme({ theme: 'dark', header: 'light' });
   await page.evaluate(installMockRuntime, fixture.url);
   await page.addScriptTag({ path: path.join(projectRoot, 'extension/adapter.js') });
+  await page.addScriptTag({ path: path.join(projectRoot, 'extension/layout.js') });
+  await page.addScriptTag({ path: path.join(projectRoot, 'extension/commitments.js') });
   await page.addScriptTag({ path: path.join(projectRoot, 'extension/content.js') });
   await page.locator('#threadlight-root').waitFor({ state: 'attached' });
   await page.waitForFunction(() => mockBridge.requests.some(request => request.type === 'CAPTURE'));
@@ -210,7 +212,7 @@ try {
       await page.getByTestId('tab-memory').click();
       await assertReadable(['#profile', '#profile::placeholder', '#save-profile', '#capture', '#memory-info', 'summary', '#forget'], theme);
       await page.getByTestId('tab-calendar').click();
-      await assertReadable(['#calendar-source', '#calendar-prompt', '#calendar-prepare', '.calendar-note'], theme);
+      await assertReadable(['#calendar-source', '#calendar-prompt', '#calendar-prepare', '#calendar-account::placeholder', '#calendar-manage-account'], theme);
     });
   }
 

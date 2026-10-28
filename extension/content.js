@@ -25,12 +25,15 @@
           <div class="notice" id="connection-note" hidden></div><div id="results" aria-live="polite"></div>
         </section>
         <section id="view-calendar" data-testid="view-calendar" hidden>
+          <div class="label-row"><label for="calendar-account">Google account</label><button class="link-btn" id="calendar-manage-account" data-testid="calendar-manage-account">Add / change</button></div>
+          <input class="field" id="calendar-account" data-testid="calendar-account" type="email" maxlength="254" placeholder="Browser default" autocomplete="email" spellcheck="false" autocapitalize="off">
+          <div class="inline-actions"><button class="secondary" id="calendar-save-account" data-testid="calendar-save-account" disabled>Save account</button><button class="link-btn" id="calendar-default-account" data-testid="calendar-default-account" disabled>Use browser default</button></div>
           <div class="label-row"><label for="calendar-source">Message or event details</label><button class="link-btn" id="calendar-use-selection">Use selection</button></div>
           <textarea class="field source" id="calendar-source" data-testid="calendar-source" maxlength="20000" placeholder="Select a message with a plan, or add the details…"></textarea>
           <div class="prompt-wrap"><div class="label-row"><label for="calendar-prompt">Additional details</label></div><textarea class="field prompt" id="calendar-prompt" data-testid="calendar-prompt" maxlength="4000" placeholder="Date, time, duration, or location…"></textarea></div>
           <div class="attach-line"><button class="attach-btn" id="calendar-attach">＋ Attach</button></div><div class="files" id="calendar-file-list"></div>
           <button class="primary" id="calendar-prepare" data-testid="calendar-prepare">${sparkle}<span id="calendar-prepare-label">Prepare event</span></button>
-          <p class="notice calendar-note">Review the details, then save in Google Calendar.</p><div id="calendar-results" data-testid="calendar-results" aria-live="polite"></div>
+          <div id="calendar-results" data-testid="calendar-results" aria-live="polite"></div>
         </section>
         <section id="view-memory" hidden><div class="label-row"><label for="profile">Writing preferences</label></div><textarea id="profile" class="field profile" maxlength="6000" placeholder="Tone and preferences for this conversation…"></textarea><div class="inline-actions"><button id="save-profile" class="secondary">Save preferences</button><button id="capture" class="secondary">Update history</button></div><div id="memory-info" class="notice"></div><details class="import-details"><summary>Import an exported chat</summary><label for="export-name">Your name in the export</label><input id="export-name" class="field" placeholder="Exact sender name"><div class="inline-actions"><button id="import" class="secondary">Import .txt or .json</button><input id="import-file" type="file" accept=".txt,.json" class="file-input"></div></details><div class="inline-actions"><button id="forget" class="link-btn danger">Clear conversation</button></div></section>
         <section id="view-tasks" hidden><button class="primary" id="find-tasks">Find commitments</button><div id="tasks"></div></section>
@@ -92,14 +95,36 @@
   const $$ = sel => [...shadow.querySelectorAll(sel)];
   let opened = false, mode = 'rewrite', activeTab = 'write', chat = null, memory = {}, attachments = [], lastSelection = null, bubblePending = null, accountLabel = '';
   let currentViewId = null, refreshPromise = null, refreshPending = false, refreshForced = false;
+  let generationPreparing = false;
   const pausedCaptures = new Map(), forgettingScopes = new Set();
   let calendarSelection = null;
+  let calendarAccount = '', calendarAccountDirty = false, calendarAccountSaving = false;
   const messageFingerprint = messages => JSON.stringify(messages.map(m => [m.id,m.text,m.direction,m.sender,m.timestamp,m.kind]));
   const captureScope = (account, id) => JSON.stringify([account, id]);
   let selectionDraft = '', requestNumber = 0, contextVersion = 0, busy = false, debounce, fingerprint = '', fingerprintScope = '', resultContext = null, ownDraft = false;
   const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
   const isCurrent = target => { const latest = adapter.getSnapshot(); return !!target && chat?.id === target.id && (!target.accountLabel || target.accountLabel === accountLabel) && latest.chat?.id === target.id && (target.viewId === undefined || latest.viewId === target.viewId); };
   function setStatus(message, error = false) { $('#status').textContent = message; $('#status').classList.toggle('error', error); }
+  function updateCalendarAccountButtons() {
+    $('#calendar-save-account').disabled = calendarAccountSaving || !calendarAccountDirty;
+    $('#calendar-default-account').disabled = calendarAccountSaving || (!calendarAccount && !$('#calendar-account').value.trim());
+  }
+  function updateCalendarAccount(value, force = false) {
+    if (typeof value !== 'string') return;
+    calendarAccount = value;
+    if (force || !calendarAccountDirty) { $('#calendar-account').value = value; calendarAccountDirty = false; }
+    updateCalendarAccountButtons();
+  }
+  async function saveCalendarAccount(value) {
+    if (calendarAccountSaving) return;
+    calendarAccountSaving = true; updateCalendarAccountButtons();
+    const before = $('#calendar-account').value;
+    try {
+      const response = await send('SAVE_CALENDAR_ACCOUNT', { calendarAccount: value });
+      updateCalendarAccount(response.calendarAccount, $('#calendar-account').value === before);
+      setStatus(response.calendarAccount ? 'Google account saved.' : 'Using browser default.');
+    } finally { calendarAccountSaving = false; updateCalendarAccountButtons(); }
+  }
   async function send(type, data = {}) {
     try {
       const response = await chrome.runtime.sendMessage({ type, ...(accountLabel ? {accountLabel} : {}), ...data });
@@ -136,6 +161,7 @@
   }
   function updateMemory(data) {
     if(data.settings?.accountLabel)accountLabel=data.settings.accountLabel;
+    if(data.settings)updateCalendarAccount(data.settings.calendarAccount);
     if (data.memory) memory = data.memory;
     const count = memory.messages?.length || 0;
     $('#coverage').textContent = `${count} messages`;
@@ -207,11 +233,17 @@
   }
   function closePanel() { opened = false; $('.panel').hidden = true; $('.launcher').hidden = false; $('#selection-bubble').hidden = true; }
   async function generate(action = activeTab === 'calendar' ? 'calendar' : mode) {
-    if (busy) return; await refresh(); const snap = adapter.getSnapshot();
+    if (busy || generationPreparing) return;
+    generationPreparing = true;
+    const initial = adapter.getSnapshot(), initialAccount = accountLabel;
+    try { await refresh(); } finally { generationPreparing = false; }
+    const snap = adapter.getSnapshot();
+    if (snap.chat?.id !== initial.chat?.id || snap.viewId !== initial.viewId || (initialAccount && accountLabel !== initialAccount)) throw new Error('The conversation changed. Generate again in the intended chat.');
     if (!chat || snap.chat?.id !== chat.id) throw new Error('Open a conversation with loaded messages first.');
     const text = action === 'commitments' ? '' : $(action === 'calendar' ? '#calendar-source' : '#source').value.trim();
     const prompt = action === 'commitments' ? '' : $(action === 'calendar' ? '#calendar-prompt' : '#prompt').value.trim();
     const selection = action === 'calendar' ? calendarSelection : lastSelection;
+    const submittedAttachments = [...attachments];
     if (['rewrite','explain','calendar'].includes(action) && !text && !attachments.length) throw new Error('Select a message, write a draft, or attach media first.');
     const n = ++requestNumber;
     const context = { chat: { ...chat }, accountLabel, viewId: snap.viewId, original: action === 'rewrite' && ownDraft ? text : '', mode: action, draft: snap.draft, range: action === 'rewrite' && lastSelection?.fromComposer && selectionDraft === snap.draft && text === lastSelection.text ? lastSelection.range : null };
@@ -219,6 +251,9 @@
     try {
       const { result } = await send('GENERATE', { chat: context.chat, accountLabel:context.accountLabel, mode: action, text, prompt, trackWriting:false, attachments: action === 'commitments' ? [] : attachments.map(({ name,mime,data }) => ({ name,mime,data })), sourceTimestamp: selection?.sourceTimestamp || '', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, now: new Date().toISOString() });
       if (n !== requestNumber || !isCurrent({...context.chat,accountLabel:context.accountLabel,viewId:context.viewId})) {if(n === requestNumber) setStatus('Conversation changed. Those suggestions were discarded.');return;}
+      if (action === 'calendar' && ($('#calendar-source').value.trim() !== text || $('#calendar-prompt').value.trim() !== prompt || calendarSelection !== selection || attachments.length !== submittedAttachments.length || attachments.some((file, index) => file !== submittedAttachments[index]))) {
+        setStatus('Event details changed. Prepare the event again.'); return;
+      }
       resultContext = context;
       if (action === 'commitments') { await refresh({ force: true }); renderTasks(); setStatus('Commitments ready.'); }
       else { renderResult(result, action); setStatus(action === 'calendar' ? 'Review the event.' : 'Suggestions ready.'); }
@@ -226,6 +261,8 @@
     } finally { if (n === requestNumber) setBusy(false); }
   }
   function safeRun(fn) { return (...args) => Promise.resolve().then(() => fn(...args)).catch(e => setStatus(e.message || 'Something went wrong.', true)); }
+  // Page scripts can see the open shadow tree, but cannot initiate privileged UI actions.
+  function userAction(fn) { return safeRun(event => { if (event instanceof Event && event.isTrusted) return fn(event); }); }
   function renderResult(result, action = mode) {
     const root = $(action === 'calendar' ? '#calendar-results' : '#results'); root.replaceChildren();
     if(result.mediaNotes?.length){const details=el('details','media-details');details.append(el('summary','','Media details'));for(const note of result.mediaNotes)details.append(el('p','media-note',note));root.append(details);}
@@ -235,12 +272,12 @@
         const head = el('div','suggestion-head',suggestion.label); head.append(el('span','suggestion-number',String(index + 1).padStart(2,'0'))); card.append(head, el('p','suggestion-text',suggestion.text));
         const actions = el('div','card-actions'); const c = resultContext;
         const insert = el('button','secondary insert',c.range ? 'Replace selection' : c.draft ? 'Replace draft' : 'Use this draft'); insert.dataset.testid='insert';
-        insert.addEventListener('click', safeRun(async () => {
+        insert.addEventListener('click', userAction(async () => {
           const outcome = adapter.insertDraft(suggestion.text, { expectedChatId: c.chat.id, expectedViewId: c.viewId, expectedDraft: c.draft, range: c.range }); if (!outcome.ok) throw new Error(outcome.error);
           setStatus('Draft inserted.'); insert.disabled = true;
           const data = await send('ACCEPT', { chat:c.chat,accountLabel:c.accountLabel,original:c.original,suggestion,feedback:c.original?result.feedback||[]:[],action:'insert' }); if(isCurrent({...c.chat,viewId:c.viewId})&&accountLabel===c.accountLabel)updateMemory(data);
         }));
-        const copy = el('button','secondary','Copy'); copy.dataset.testid='copy'; copy.addEventListener('click',safeRun(async()=>{
+        const copy = el('button','secondary','Copy'); copy.dataset.testid='copy'; copy.addEventListener('click',userAction(async()=>{
           if(!isCurrent({...c.chat,accountLabel:c.accountLabel,viewId:c.viewId}))throw new Error('The conversation changed.');
           await navigator.clipboard.writeText(suggestion.text); setStatus('Copied.');
           const data=await send('ACCEPT',{chat:c.chat,accountLabel:c.accountLabel,original:c.original,suggestion,feedback:c.original?result.feedback||[]:[],action:'copy'}); if(isCurrent({...c.chat,viewId:c.viewId})&&accountLabel===c.accountLabel)updateMemory(data);
@@ -262,8 +299,9 @@
     const description=el('label','','Notes');const notes=el('textarea','field');notes.value=event.description||'';description.append(notes);form.append(description);
     let reviewed=null;
     if(event.needsClarification){const label=el('label','review-check','Missing details checked');reviewed=el('input');reviewed.type='checkbox';reviewed.dataset.testid='calendar-reviewed';label.prepend(reviewed);form.append(label);}
-    const button=el('button','primary','Review in Google Calendar');button.dataset.testid='calendar-open';button.addEventListener('click',safeRun(async()=>{
+    const button=el('button','primary','Review in Google Calendar');button.dataset.testid='calendar-open';button.addEventListener('click',userAction(async()=>{
       if(!isCurrent({...context.chat,accountLabel:context.accountLabel,viewId:context.viewId}))throw new Error('The conversation changed. Prepare this event again.');
+      if(calendarAccountSaving||calendarAccountDirty)throw new Error('Save the Google account or use the browser default first.');
       const value={...event,description:notes.value};Object.entries(fields).forEach(([k,v])=>value[k]=v.value.trim());
       if(!value.title||!value.start||!value.end)throw new Error('Add a title, start, and end time before opening Calendar.');
       if(reviewed&&!reviewed.checked)throw new Error('Check the missing details, then tick the review box.');
@@ -295,9 +333,17 @@
     if(!tasks.length){root.append(el('div','empty','No commitments.'));return;}
     const target=chat?{...chat,accountLabel,viewId:currentViewId}:null;
     for(const task of tasks){
-      const card=el('article','task');card.append(el('div','task-title',task.title),el('div','task-meta',`${task.owner||'Owner unclear'} · ${task.due||'No date specified'} · ${task.status||'pending'}`));if(task.source)card.append(el('div','task-source',task.source));
-      const actions=el('div','card-actions');if(!task.status||task.status==='pending')for(const [label,status] of [['Done','done'],['Dismiss','dismissed']]){const b=el('button','secondary',label);b.onclick=safeRun(async()=>{if(!isCurrent(target))throw new Error('The conversation changed.');const data=await send('UPDATE_TASK',{chat:target,id:task.id,status});if(isCurrent(target))updateMemory(data);});actions.append(b);}
-      const calendar=el('button','secondary','Calendar');calendar.onclick=safeRun(()=>{if(!isCurrent(target))throw new Error('The conversation changed.');setTab('calendar');$('#calendar-source').value=[task.title,task.due,task.source].filter(Boolean).join('\n');calendarSelection=null;$('#calendar-results').replaceChildren();$('#calendar-prompt').focus();});actions.append(calendar);card.append(actions);root.append(card);
+      const display=globalThis.WACopilot.commitments.present(task);
+      const card=el('article','task');
+      const heading=el('div','task-heading');heading.append(el('div','task-title',display.title),el('span','task-status '+display.status,display.statusLabel));card.append(heading);
+      const meta=el('div','task-meta');meta.append(el('span','',display.owner),el('span','task-due',display.due==='No due date'?display.due:'Due '+display.due));card.append(meta);
+      if(display.quote){
+        card.append(el('blockquote','task-source',display.quote));
+        if(display.sourceLabel)card.append(el('div','task-attribution',display.sourceLabel));
+        if(display.quoteTruncated){const details=el('details','task-more');details.append(el('summary','','Full message'),el('p','task-source',display.fullQuote));card.append(details);}
+      }
+      const actions=el('div','card-actions');if(!task.status||task.status==='pending')for(const [label,status] of [['Done','done'],['Dismiss','dismissed']]){const b=el('button','secondary',label);b.onclick=userAction(async()=>{if(!isCurrent(target))throw new Error('The conversation changed.');const data=await send('UPDATE_TASK',{chat:target,id:task.id,status});if(isCurrent(target))updateMemory(data);});actions.append(b);}
+      const calendar=el('button','secondary','Calendar');calendar.onclick=userAction(()=>{if(!isCurrent(target))throw new Error('The conversation changed.');setTab('calendar');$('#calendar-source').value=[task.title,task.due,task.source].filter(Boolean).join('\n');calendarSelection=null;$('#calendar-results').replaceChildren();$('#calendar-prompt').focus();});actions.append(calendar);card.append(actions);root.append(card);
     }
   }
   function parseImport(text,name) {
@@ -311,22 +357,26 @@
     if(!messages.some(m=>m.sender===name))throw new Error('Your sender name was not found. Enter it exactly as it appears in the export.');
     return messages.map((m,i)=>({...m,id:`import:${m.timestamp}:${m.sender}:${i}`}));
   }
-  $('.launcher').onclick=safeRun(()=>openPanel());$('#close').onclick=closePanel;$('#settings').onclick=safeRun(()=>send('OPEN_SETTINGS'));
+  $('.launcher').onclick=userAction(()=>openPanel());$('#close').onclick=closePanel;$('#settings').onclick=userAction(()=>send('OPEN_SETTINGS'));
   $$('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
   $$('[data-mode]').forEach(b=>b.onclick=()=>{setMode(b.dataset.mode);$('#results').replaceChildren();});
   $$('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;$('#prompt').focus();});
   $('#source').addEventListener('input',()=>{if(!lastSelection?.text)ownDraft=true;});
-  $('#generate').onclick=safeRun(()=>generate(mode));$('#find-tasks').onclick=safeRun(()=>generate('commitments'));
-  $('#calendar-prepare').onclick=safeRun(()=>generate('calendar'));
-  $('#calendar-use-selection').onclick=safeRun(()=>{const selected=adapter.getSelection();if(!selected.text)throw new Error('Select a message in the conversation first.');calendarSelection=selected;$('#calendar-source').value=selected.text;$('#calendar-results').replaceChildren();});
+  $('#generate').onclick=userAction(()=>generate(mode));$('#find-tasks').onclick=userAction(()=>generate('commitments'));
+  $('#calendar-prepare').onclick=userAction(()=>generate('calendar'));
+  $('#calendar-account').addEventListener('input',()=>{calendarAccountDirty=$('#calendar-account').value.trim().toLowerCase()!==calendarAccount;updateCalendarAccountButtons();});
+  $('#calendar-save-account').onclick=userAction(()=>saveCalendarAccount($('#calendar-account').value));
+  $('#calendar-default-account').onclick=userAction(()=>{if(calendarAccountSaving)return;$('#calendar-account').value='';calendarAccountDirty=true;return saveCalendarAccount('');});
+  $('#calendar-manage-account').onclick=userAction(async()=>{await send('OPEN_CALENDAR_ACCOUNT');setStatus('Google opened. Save the account email here.');});
+  $('#calendar-use-selection').onclick=userAction(()=>{const selected=adapter.getSelection();if(!selected.text)throw new Error('Select a message in the conversation first.');calendarSelection=selected;$('#calendar-source').value=selected.text;$('#calendar-results').replaceChildren();});
   $('#calendar-source').addEventListener('input',()=>{if(calendarSelection&&$('#calendar-source').value!==calendarSelection.text)calendarSelection=null;$('#calendar-results').replaceChildren();});
   $('#calendar-prompt').addEventListener('input',()=>$('#calendar-results').replaceChildren());
   $('#use-draft').onclick=()=>{const snap=adapter.getSnapshot();$('#source').value=snap.draft;lastSelection=null;ownDraft=true;setMode('rewrite');};
   $('#attach').onclick=()=>$('#files').click();$('#calendar-attach').onclick=()=>$('#files').click();$('#files').onchange=()=>{const files=[...$('#files').files];safeRun(async()=>{try{await addFiles(files);}finally{$('#files').value='';}})();};
   shadow.addEventListener('paste',e=>{if(e.clipboardData?.files.length){e.preventDefault();safeRun(()=>addFiles(e.clipboardData.files))();}});
-  $('#save-profile').onclick=safeRun(async()=>{if(!isCurrent({...chat,viewId:currentViewId}))throw new Error('Open a conversation first.');const target={...chat,accountLabel,viewId:currentViewId};const data=await send('SAVE_PROFILE',{chat:target,profile:$('#profile').value});if(isCurrent(target)){updateMemory(data);setStatus('Preferences saved.');}});
-  $('#capture').onclick=safeRun(async()=>{await refresh({force:true});setStatus('History updated.');});
-  $('#forget').onclick=safeRun(async()=>{
+  $('#save-profile').onclick=userAction(async()=>{if(!isCurrent({...chat,viewId:currentViewId}))throw new Error('Open a conversation first.');const target={...chat,accountLabel,viewId:currentViewId};const data=await send('SAVE_PROFILE',{chat:target,profile:$('#profile').value});if(isCurrent(target)){updateMemory(data);setStatus('Preferences saved.');}});
+  $('#capture').onclick=userAction(async()=>{await refresh({force:true});setStatus('History updated.');});
+  $('#forget').onclick=userAction(async()=>{
     const target=chat?{...chat,accountLabel,viewId:currentViewId}:null;if(!isCurrent(target))return;
     if(!window.confirm('Forget saved messages, preferences, examples, and commitments for this conversation?'))return;
     const scope=captureScope(target.accountLabel,target.id),mark=messageFingerprint(adapter.getSnapshot().messages);
@@ -348,12 +398,13 @@
   }
   document.addEventListener('mouseup',bubbleSelection);document.addEventListener('keyup',event=>{if(event.key==='Shift')bubbleSelection(event);});
   const openSelection=next=>{if(bubblePending?.chatId!==adapter.getSnapshot().chat?.id||bubblePending?.viewId!==adapter.getSnapshot().viewId)throw new Error('The conversation changed. Select the message again.');return openPanel(next,bubblePending?.selection.text);};
-  $('#ask-selection').onclick=safeRun(()=>openSelection('rewrite'));$('#calendar-selection').onclick=safeRun(()=>openSelection('calendar'));
+  $('#ask-selection').onclick=userAction(()=>openSelection('rewrite'));$('#calendar-selection').onclick=userAction(()=>openSelection('calendar'));
   document.addEventListener('keydown',event=>{if(event.key==='Escape'){closePanel();return;}if(event.altKey&&event.shiftKey&&event.code==='KeyW'){event.preventDefault();opened?closePanel():safeRun(()=>openPanel())();}});
-  $('#prompt').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();safeRun(()=>generate())();}});
-  $('#calendar-prompt').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();safeRun(()=>generate('calendar'))();}});
-  chrome.runtime.onMessage.addListener(message=>{if(message.type==='UI_ACCOUNT_CHANGED'){accountLabel='';resetForChat(null);safeRun(()=>refresh({force:true}))();}if(message.type==='UI_OPEN'){if(message.toggle&&opened)closePanel();else safeRun(()=>openPanel(message.mode||'rewrite',message.text))();}});
+  $('#prompt').addEventListener('keydown',e=>{if(e.isTrusted&&(e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();safeRun(()=>generate())();}});
+  $('#calendar-prompt').addEventListener('keydown',e=>{if(e.isTrusted&&(e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();safeRun(()=>generate('calendar'))();}});
+  chrome.runtime.onMessage.addListener(message=>{if(message.type==='UI_CALENDAR_ACCOUNT_CHANGED')updateCalendarAccount(message.calendarAccount);if(message.type==='UI_ACCOUNT_CHANGED'){accountLabel='';resetForChat(null);safeRun(()=>refresh({force:true}))();}if(message.type==='UI_OPEN'){if(message.toggle&&opened)closePanel();else safeRun(()=>openPanel(message.mode||'rewrite',message.text))();}});
   new MutationObserver(()=>{bindThemeTargets();clearTimeout(debounce);debounce=setTimeout(()=>refresh().catch(e=>setStatus(e.message,true)),280);}).observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['data-id','title','data-testid']});
   document.addEventListener('threadlight-view-changed',()=>{if(adapter.getSnapshot().viewId!==currentViewId)safeRun(()=>refresh({force:true}))();});
   safeRun(()=>refresh({force:true}))();
+  safeRun(async()=>{const response=await send('GET_CALENDAR_ACCOUNT');updateCalendarAccount(response.calendarAccount);})();
 })();

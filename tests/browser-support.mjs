@@ -38,7 +38,7 @@ export function installMockRuntime(baseUrl) {
   };
   const stats = { requests:0, accepted:0, acceptedCount:0, rewrites:0, wordsReviewed:0, categories:{}, recentFeedback:[], messageCount:0,capturedMessages:0,capturedTotal:0,incomingMessages:0,outgoingMessages:0,acceptedSuggestions:0,acceptedRewrites:0,copiedSuggestions:0,insertedSuggestions:0,feedbackCounts:{},commonIssues:[],pendingTasks:0,retentionRemovals:0,historyLimited:true };
   const state = chat => ({ ok: true, settings: { accountLabel: window.mockBridge.accountLabel, bridgeUrl: 'http://127.0.0.1:4318' }, memory: memory(chat), stats });
-  window.mockBridge = { requests: [], calendars: [], delay: 0, saveProfileDelay:0, accountLabel:'Personal', calendarNeedsClarification:false, memories, dispatch(message) { listeners.forEach(listener => listener(message, {}, () => {})); } };
+  window.mockBridge = { requests: [], calendars: [], delay: 0, saveProfileDelay:0, accountLabel:'Personal', calendarNeedsClarification:false, calendarAccount:'', memories, dispatch(message) { listeners.forEach(listener => listener(message, {}, () => {})); } };
   const handle = async message => {
     window.mockBridge.requests.push(JSON.parse(JSON.stringify(message)));
     switch (message.type) {
@@ -58,7 +58,10 @@ export function installMockRuntime(baseUrl) {
       case 'UPDATE_TASK': {const task=memory(message.chat).tasks.find(task=>task.id===message.id);if(task)task.status=message.status;return state(message.chat);}
       case 'HEALTH': return { ok: true, ready: true, configured: true, model: 'test-double' };
       case 'OPEN_SETTINGS': return { ok: true };
-      case 'OPEN_CALENDAR': window.mockBridge.calendars.push(message.event); return { ok: true, opened: true };
+      case 'GET_CALENDAR_ACCOUNT': return { ok: true, calendarAccount: window.mockBridge.calendarAccount };
+      case 'SAVE_CALENDAR_ACCOUNT': window.mockBridge.calendarAccount = message.calendarAccount || ''; return { ok: true, calendarAccount: window.mockBridge.calendarAccount };
+      case 'OPEN_CALENDAR_ACCOUNT': return { ok: true, opened: true };
+      case 'OPEN_CALENDAR': window.mockBridge.calendars.push({ ...message.event, calendarAccount: window.mockBridge.calendarAccount }); return { ok: true, opened: true };
       case 'ACCEPT': stats.accepted += 1; stats.acceptedCount += 1; stats.acceptedSuggestions += 1; if(message.original) stats.acceptedRewrites += 1; return { ok: true, stats };
       case 'GENERATE': {
         if (window.mockBridge.delay) await new Promise(resolve => setTimeout(resolve, window.mockBridge.delay));
@@ -79,7 +82,7 @@ export function installMockRuntime(baseUrl) {
         } else if (message.mode === 'explain') {
           result.explanation = 'Alex is asking for the final design tomorrow morning and proposing a review at 10.';
         } else if (message.mode === 'commitments') {
-          result.commitments = [{ title: 'Send the final design', due: '2026-10-29', owner: 'You', source: 'Could you send the final version tomorrow morning?' }];
+          result.commitments = [{ title: 'Send the final design', due: '2026-10-29', owner: 'You', source: '"Could you send the final version tomorrow morning?" — sender: Alex Rao, id: ABCDEF123456789, timestamp: 09:35, 27/10/2026' }];
           memory(message.chat).tasks=result.commitments.map((task,index)=>({...task,id:`test-task-${index}`,status:'pending'}));
         }
         return { ok: true, result };

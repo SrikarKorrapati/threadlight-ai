@@ -1,4 +1,4 @@
-/* The DOM adapter is the only file coupled to WhatsApp's page structure. */
+/* Conversation selectors and editor interactions are isolated in this DOM adapter. */
 (() => {
   const ns = globalThis.WACopilot = globalThis.WACopilot || {};
   const clean = value => String(value || '').replace(/[\u200b\u200e\u200f]/g, '').trim();
@@ -6,6 +6,15 @@
   const main = () => document.querySelector('#main');
   const getComposer = root => root?.querySelector('footer [contenteditable="true"][role="textbox"], footer [contenteditable="true"][data-lexical-editor], footer [contenteditable="true"]') || null;
   const textOf = node => clean(node?.innerText ?? node?.textContent);
+  const captureTextLimit = 12000;
+  const truncationNotice = '\n[Message truncated: remaining text was not captured.]';
+  function boundedCaptureText(value) {
+    if (value.length <= captureTextLimit) return value;
+    let end = captureTextLimit - truncationNotice.length;
+    // The storage limit counts UTF-16 code units; retain complete Unicode characters.
+    if (/[\uD800-\uDBFF]/.test(value[end - 1]) && /[\uDC00-\uDFFF]/.test(value[end])) end--;
+    return value.slice(0, end) + truncationNotice;
+  }
   const observedOwners = new Map();
   let viewId = 0, lastView = null, viewEventQueued = false;
   function advanceView(notify = true) {
@@ -65,6 +74,7 @@
       const kind = audio ? 'audio' : video ? 'video' : picture ? 'image' : doc ? 'document' : 'text';
       if (!text && kind !== 'text') text = `[${kind} attachment — contents not captured; attach the file to use it]`;
       if (!text) continue;
+      text = boundedCaptureText(text);
       const prefix = body?.getAttribute('data-pre-plain-text') || '';
       const sender = prefix.replace(/^\[[^\]]*\]\s*/, '').replace(/:\s*$/, '');
       messages.push({ id, text, direction: outgoing ? 'out' : 'in', sender: clean(sender), timestamp: prefix.match(/^\[([^\]]*)\]/)?.[1] || '', kind });
@@ -132,6 +142,9 @@
     if (event.composedPath().some(node => node?.id === 'threadlight-root')) return;
     const root = main();
     if (!root || (event.target instanceof Node && root.contains(event.target))) return;
+    // Focusing WhatsApp's search box does not leave the open conversation.
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (target?.closest('input, textarea, select, [contenteditable="true"], [role="textbox"], [role="searchbox"]')) return;
     advanceView();
   }
   document.addEventListener('pointerdown', observeNavigation, true);

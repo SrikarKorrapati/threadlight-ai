@@ -183,6 +183,92 @@ test('ambiguous, impossible, reversed or timezone-less event dates are rejected'
   }
 });
 
+test('Calendar account saves globally, survives restart and connection changes, and never exposes pairing credentials', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  assert.deepEqual(await h.background.handleMessage({ type: 'GET_CALENDAR_ACCOUNT' }, content), { ok: true, calendarAccount: '' });
+  const saved = await h.background.handleMessage({ type: 'SAVE_CALENDAR_ACCOUNT', calendarAccount: '  Writer+Calendar@Example.com  ', chat, accountLabel: 'Unrelated', pairingToken: 'replace-token', bridgeUrl: 'https://evil.example' }, content);
+  assert.deepEqual(saved, { ok: true, calendarAccount: 'writer+calendar@example.com' });
+  assert.equal(h.data[STORAGE_KEYS.settings].pairingToken, paired.pairingToken);
+  assert.equal(h.data[STORAGE_KEYS.settings].bridgeUrl, paired.bridgeUrl);
+  assert.equal(h.data[STORAGE_KEYS.settings].accountLabel, 'Personal');
+  assert.deepEqual(h.broadcasts, [{ id: 1, value: { type: 'UI_CALENDAR_ACCOUNT_CHANGED', calendarAccount: 'writer+calendar@example.com' } }]);
+  const state = await h.background.handleMessage({ type: 'GET_STATE', chat: { id: 'other-contact', name: 'Other' } }, content);
+  assert.equal(state.settings.calendarAccount, 'writer+calendar@example.com');
+  assert.equal(JSON.stringify(state).includes(paired.pairingToken), false);
+  await h.background.handleMessage({ type: 'SAVE_SETTINGS', settings: { ...paired, accountLabel: 'Work' } }, options);
+  const restarted = harness({ saved: h.data });
+  assert.deepEqual(await restarted.background.handleMessage({ type: 'GET_CALENDAR_ACCOUNT' }, content), { ok: true, calendarAccount: 'writer+calendar@example.com' });
+  assert.equal(h.tabs.length, 0);
+  assert.equal(h.networkCalls(), 0);
+});
+
+test('reviewed Calendar events use the saved email and clearing it restores the browser default', async () => {
+  const event = { title: 'Review & plan', start: '2026-10-29T10:00:00Z', end: '2026-10-29T11:00:00Z', timeZone: 'UTC', description: 'Private fictional event details' };
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: { ...paired, calendarAccount: 'writer+calendar@example.com' } } });
+  const response = await h.background.handleMessage({ type: 'OPEN_CALENDAR', event, calendarAccount: 'ignored@example.com' }, content);
+  assert.equal(response.ok, true);
+  const first = new URL(h.tabs[0].url);
+  assert.equal(first.origin, 'https://calendar.google.com');
+  assert.equal(first.searchParams.get('authuser'), 'writer+calendar@example.com');
+  assert.equal(first.searchParams.get('text'), event.title);
+  assert.equal(first.searchParams.get('details'), event.description);
+  assert.equal(first.searchParams.get('action'), 'TEMPLATE');
+  assert.equal(first.searchParams.has('add'), false);
+  assert.equal((await h.background.handleMessage({ type: 'SAVE_CALENDAR_ACCOUNT', calendarAccount: '' }, content)).ok, true);
+  await h.background.handleMessage({ type: 'OPEN_CALENDAR', event }, content);
+  assert.equal(new URL(h.tabs[1].url).searchParams.has('authuser'), false);
+  assert.equal(h.networkCalls(), 0);
+});
+
+test('Calendar account rejects malformed and oversized addresses without changing saved settings', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: { ...paired, calendarAccount: 'saved@example.com' } } });
+  for (const calendarAccount of [undefined, null, {}, 0, 'missing-at.example.com', 'a b@example.com', 'person@example.com\r\nX-Test: bad', 'https://evil.example', 'a'.repeat(65) + '@example.com', 'a@' + 'x'.repeat(260) + '.com']) {
+    const response = await h.background.handleMessage({ type: 'SAVE_CALENDAR_ACCOUNT', calendarAccount }, content);
+    assert.equal(response.ok, false);
+  }
+  assert.equal((await h.background.handleMessage({ type: 'GET_CALENDAR_ACCOUNT' }, content)).calendarAccount, 'saved@example.com');
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.broadcasts.length, 0);
+  assert.equal(h.tabs.length, 0);
+  assert.equal(h.networkCalls(), 0);
+});
+
+test('failed Calendar account persistence leaves the saved account and broadcasts unchanged', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: { ...paired, calendarAccount: 'saved@example.com' } }, setImpl: async () => { throw new Error('Storage unavailable'); } });
+  const response = await h.background.handleMessage({ type: 'SAVE_CALENDAR_ACCOUNT', calendarAccount: 'unsaved@example.com' }, content);
+  assert.equal(response.ok, false);
+  assert.match(response.error, /Storage unavailable/);
+  assert.equal((await h.background.handleMessage({ type: 'GET_CALENDAR_ACCOUNT' }, content)).calendarAccount, 'saved@example.com');
+  assert.equal(h.data[STORAGE_KEYS.settings].calendarAccount, 'saved@example.com');
+  assert.equal(h.broadcasts.length, 0);
+});
+
+test('Google account chooser opens only ordinary Calendar with no event data, tokens or OAuth scopes', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: { ...paired, calendarAccount: 'saved@example.com' } } });
+  assert.deepEqual(await h.background.handleMessage({ type: 'OPEN_CALENDAR_ACCOUNT', text: 'Private chat', event: { title: 'Private appointment' }, continue: 'https://evil.example', scope: 'calendar' }, content), { ok: true, opened: true });
+  const url = new URL(h.tabs[0].url);
+  assert.equal(url.origin, 'https://accounts.google.com');
+  assert.equal(url.pathname, '/AccountChooser');
+  assert.deepEqual([...url.searchParams], [['continue', 'https://calendar.google.com/calendar/']]);
+  assert.equal(h.networkCalls(), 0);
+  assert.equal(h.writes.length, 0);
+  for (const type of ['GET_CALENDAR_ACCOUNT', 'SAVE_CALENDAR_ACCOUNT', 'OPEN_CALENDAR_ACCOUNT']) {
+    assert.equal((await h.background.handleMessage({ type, calendarAccount: 'attacker@example.com' }, { ...content, url: 'https://evil.example' })).ok, false);
+  }
+  assert.equal(h.tabs.length, 1);
+});
+
+test('selected Google account is not sent to the model with conversation context', async () => {
+  let body;
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: { ...paired, calendarAccount: 'calendar-private@example.com' } }, fetchImpl: async (_url, init) => {
+    body = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ ok: true, result: aiResult() }) };
+  } });
+  assert.equal((await h.background.handleMessage(request(), content)).ok, true);
+  assert.equal(Object.hasOwn(body, 'calendarAccount'), false);
+  assert.equal(JSON.stringify(body).includes('calendar-private@example.com'), false);
+});
+
 test('invalid or oversized attachments never leave the extension', async () => {
   const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
   for (const attachments of [[{ name: 'bad.png', mime: 'image/png', data: 'not base64!' }], Array.from({ length: 5 }, () => ({ name: 'a.txt', mime: 'text/plain', data: 'YQ==' }))]) {

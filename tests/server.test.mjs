@@ -154,4 +154,35 @@ test('generation flushes headers before the model resolves and streams valid JSO
   }
 });
 
+
+test('simultaneous request bodies cannot bypass the two-generation limit', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'threadlight-limit-'));
+  let release, accepted = 0, received = 0, allReceived;
+  const providerPending = new Promise(resolve => { release = resolve; });
+  const requestsReceived = new Promise(resolve => { allReceived = resolve; });
+  const bridge = await createBridge({ configPath: join(directory, 'config.json'), env: { OPENAI_API_KEY: 'sk-test-no-network' }, ffmpeg: null, port: 0, fetchImpl: async () => {
+    accepted++; await providerPending; return responseFor(result());
+  } });
+  bridge.server.on('request', () => { if (++received === 3) allReceived(); });
+  const { port } = await bridge.listen();
+  t.after(async () => { release(); await bridge.close(); await rm(directory, { recursive: true, force: true }); });
+  const body = JSON.stringify(sample());
+  const requests = Array.from({ length: 3 }, () => {
+    let request;
+    const status = new Promise((resolve, reject) => {
+      request = http.request({ hostname: '127.0.0.1', port, path: '/api/generate', method: 'POST', headers: {
+        'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${bridge.config.get().pairingToken}`,
+      } }, response => { response.resume(); resolve(response.statusCode); });
+      request.on('error', reject); request.flushHeaders();
+    });
+    return { request, status };
+  });
+  await requestsReceived;
+  for (const { request } of requests) request.end(body);
+  const statuses = await Promise.all(requests.map(({ status }) => status));
+  assert.deepEqual(statuses.sort(), [200, 200, 429]);
+  assert.equal(accepted, 2);
+  release();
+});
+
 export { sample, result, responseFor };

@@ -4,17 +4,18 @@ Tested on 28 October 2026.
 
 ## Automated checks
 
-- 59 Node tests passed, covering memory/account separation, startup migration to displayed-name scopes, source dates, authenticated requests, storage failures, stale work, calendar validation, provider errors, media processing, safe setup-page navigation, and credential filtering in model text inputs.
-- 32 interface/DOM checks passed in isolated Chromium, covering the selection popup, free-form prompts, three suggestions, partial draft replacement, no-send behavior, stale drafts/chats/accounts, attachments, a dedicated Calendar view, event editing, history import, commitments, automatic displayed-name scoping, and initial/new/edited-message capture while the panel is closed without automatic model requests.
-- 18 dedicated adapter checks passed, covering automatic displayed-name identity, normalization, header transitions, same-name contacts, independent view guards for draft insertion, and the observed modern `conv-msg-*`/`tail-in`/`tail-out` structure.
-- 4 actual Manifest V3 extension checks passed in a disposable Chromium profile. The WhatsApp URL was intercepted with a fictional local fixture; no real account was used.
-- 5 setup-page browser checks passed, covering local key save/removal, concealed key retrieval, pairing rotation, and narrow-screen layout.
-- 12 theme checks passed, covering page-theme precedence over system appearance, live theme changes, header replacement, transparent-background fallback, protection from host-page font overrides, readable contrast, and narrow-screen layout.
-- JavaScript syntax checks passed.
+Version 0.2.2 passed all **164 automated checks**:
 
-The 0.2.0 build passed its original 118 checks. For the 0.2.1 appearance update, 53 browser checks passed: 32 interaction, 12 theme, 4 actual-extension, and 5 setup checks. The unchanged core and adapter checks retain their prior validation. Writing, Calendar, and setup screens were visually inspected using fictional fixtures.
+- 78 Node tests: memory/account isolation, migration, persistence failure, paired requests, setup security, Calendar account choice and URLs, safe source formatting, config-write serialization, concurrent request limits, provider errors, text-credential filtering, and real local FFmpeg preprocessing.
+- 34 interface checks: selection prompts, suggestions, safe insertion, attachments, automatic history capture while the panel is closed, separate Calendar UI, account save/default/chooser actions, trusted-action guards, readable commitments, and chat/account changes.
+- 20 adapter checks: displayed-name identity, modern message wrappers, transitions, same-name view guards, bounded long/emoji messages, and strict imports.
+- 7 layout checks: desktop side docking, narrow bottom docking, visible chat/composer/Send, no overflow, restored inline styles and dimensions, app replacement, and repeated open/close cycles.
+- 4 lifecycle checks: stale Calendar source/prompt results are discarded, search focus preserves unsaved inputs, and rapid Generate clicks during capture cannot issue duplicate requests.
+- 12 appearance checks: page/system theme precedence, live switching, header replacement, font isolation, contrast, and narrow layouts.
+- 4 actual Manifest V3 checks in disposable Chromium with an intercepted fictional WhatsApp page.
+- 5 setup-page checks: local key handling, concealed retrieval, token rotation, and narrow layout.
 
-Test responses are simulated only inside the test harness. The production extension requires the real local service and OpenAI connection.
+JavaScript syntax checks and `git diff --check` passed. Light/dark writing and Calendar screens plus readable commitment cards were visually inspected using fictional fixtures. Test doubles are confined to test code; production requires the real local service and OpenAI connection.
 
 ## Live OpenAI checks
 
@@ -41,3 +42,11 @@ The Progress interface and explanatory taglines were removed. In version 0.2.1, 
 The automated fixtures verify the mechanisms, not every live WhatsApp variant. Rows without reliable direction evidence are omitted. All WhatsApp selectors remain isolated in `extension/adapter.js`.
 
 PDF input is verified by request-shape tests and the documented OpenAI API format; a live PDF request has not been made. FFmpeg processing has been tested with real generated media, including a short H.264 clip.
+
+## Version 0.2.2 review
+
+The complete production codebase was reviewed across UI/adapter/layout, background and memory, server/configuration, validation, provider/media processing, permissions, and setup. `ARCHITECTURE.md` records the boundaries and fixed issues. The review included reproductions and regression tests for oversized message capture, stale Calendar previews, lost configuration updates, untrusted page actions, request races, and misleading provider errors.
+
+Calendar account selection is covered by isolated UI and background URL tests. It does not add OAuth authorization. No Google Calendar event was saved and no Google account was changed during these checks.
+
+The 0.2.2 extension was reloaded in the logged-in Brave session and the local service restarted with the saved key still configured. Live geometry checks measured a 1,650px viewport with chat/composer ending at x=1,250px and the sidebar starting at x=1,250px. At an 866px viewport, chat/composer ended at y=472px and the bottom dock started at y=472px. Both checks reported zero overlap. The Calendar account field, Add/change, Save account, and browser-default controls were visibly present; the removed explanatory sentence was absent. No generation, WhatsApp send, Google sign-in change, or event save was triggered by these live checks.
