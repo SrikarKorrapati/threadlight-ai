@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Threadlight — Personal WhatsApp Copilot",
+  "version": "0.1.0",
+  "description": "Select a message, ask for a rewrite, or suggest a reply with personal conversation memory.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "contextMenus"],
+  "host_permissions": ["https://web.whatsapp.com/*", "http://127.0.0.1:4318/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Open Threadlight" },
+  "options_page": "options.html",
+  "commands": {
+    "open-copilot": {
+      "suggested_key": { "default": "Alt+Shift+W", "mac": "Alt+Shift+W" },
+      "description": "Open Threadlight on WhatsApp Web"
+    }
+  },
+  "content_scripts": [{
+    "matches": ["https://web.whatsapp.com/*"],
+    "js": ["adapter.js", "content.js"],
+    "run_at": "document_idle"
+  }],
+  "web_accessible_resources": [{ "resources": ["content.css"], "matches": ["https://web.whatsapp.com/*"] }],
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; connect-src http://127.0.0.1:4318" }
+}

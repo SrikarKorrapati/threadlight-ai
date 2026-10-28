@@ -1,0 +1,51 @@
+/** Exercises the real local setup UI with an obviously fake key; never calls OpenAI. */
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { createBridge } from '../server/index.mjs';
+import { projectRoot } from './browser-support.mjs';
+
+const {chromium}=await import(process.env.COPILOT_PLAYWRIGHT || 'playwright');
+const temp=await mkdtemp(path.join(os.tmpdir(),'threadlight-setup-test-'));
+let providerCalls=0;
+const bridge=await createBridge({configPath:path.join(temp,'config.json'),env:{},port:0,fetchImpl:async()=>{providerCalls++;throw new Error('Provider must not be called in setup tests.');}});
+const address=await bridge.listen();
+const browser=await chromium.launch({headless:true,...(process.env.COPILOT_CHROMIUM ? {executablePath:process.env.COPILOT_CHROMIUM} : {})});
+const page=await browser.newPage({viewport:{width:1440,height:1050}});
+const errors=[];page.on('pageerror',error=>errors.push(error.message));
+try {
+  await page.goto(`http://127.0.0.1:${address.port}`);
+  await page.waitForFunction(()=>document.querySelector('#status').textContent==='Add an API key');
+  const initialToken=await page.locator('#pairing-token').inputValue();
+  assert.ok(initialToken.length>=32);
+  assert.equal(await page.locator('#pairing-token').getAttribute('type'),'password');
+  console.log('PASS setup loads and conceals the pairing token');
+  const fakeKey='sk-this-is-a-fake-key-for-isolated-browser-testing';
+  await page.locator('#api-key').fill(fakeKey);
+  await page.locator('#save').click();
+  await page.waitForFunction(()=>document.querySelector('#status').textContent==='Key configured');
+  assert.equal(await page.locator('#api-key').inputValue(),'');
+  assert.equal(JSON.parse(await readFile(path.join(temp,'config.json'),'utf8')).apiKey,fakeKey);
+  assert.equal(providerCalls,0);
+  console.log('PASS saving a key stays local and clears the input');
+  await page.reload();
+  await page.waitForFunction(()=>document.querySelector('#status').textContent==='Key configured');
+  assert.equal(await page.locator('#api-key').inputValue(),'');
+  assert.ok(!(await page.locator('body').innerText()).includes(fakeKey));
+  console.log('PASS reload never returns the saved API key to the page');
+  await page.locator('#rotate-token').click();
+  await page.waitForFunction(token=>document.querySelector('#pairing-token').value!==token,initialToken);
+  console.log('PASS token rotation updates the setup state');
+  await page.locator('#clear-key').click();
+  await page.waitForFunction(()=>document.querySelector('#status').textContent==='Add an API key');
+  assert.equal(providerCalls,0);
+  await page.reload();
+  await page.waitForFunction(()=>document.querySelector('#status').textContent==='Add an API key');
+  await page.screenshot({path:path.join(projectRoot,'demo/setup-preview.png'),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  console.log('PASS setup supports a narrow viewport without horizontal overflow');
+  assert.deepEqual(errors,[]);
+  console.log('\n5 setup-browser checks passed. No API requests were made.');
+} finally {await browser.close();await bridge.close();await rm(temp,{recursive:true,force:true});}
