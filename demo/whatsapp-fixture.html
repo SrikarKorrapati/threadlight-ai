@@ -7,8 +7,9 @@
   <style>
     * { box-sizing: border-box; }
     body { margin:0; color:#1b3430; background:#f2f5f1; font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    .fixture-banner { height:34px; padding:7px 24px; background:#174f43; color:#fff; font-size:12px; letter-spacing:.02em; }
-    .layout { display:grid; grid-template-columns:290px 1fr; height:calc(100vh - 34px); }
+    #app { position:fixed; inset:0; display:flex; flex-direction:column; }
+    .fixture-banner { flex-shrink:0; height:34px; padding:7px 24px; background:#174f43; color:#fff; font-size:12px; letter-spacing:.02em; }
+    .layout { display:grid; grid-template-columns:290px minmax(0,1fr); flex:1; min-height:0; }
     aside { padding:26px 18px; background:#fff; border-right:1px solid #dde5df; }
     aside h1 { margin:0 0 6px; font-size:24px; letter-spacing:-.8px; }
     aside p { color:#718078; font-size:12px; margin-bottom:26px; }
@@ -33,6 +34,7 @@
     #send { border:0; border-radius:50%; background:#176c50; color:white; width:44px; height:44px; font-size:22px; cursor:pointer; }
     .fixture-controls { position:fixed; left:18px; bottom:20px; width:250px; font-size:11px; color:#718078; }
     .fixture-controls button { border:1px solid #d6e1d8; border-radius:8px; background:#fff; color:#345e47; padding:8px; margin-right:4px; cursor:pointer; }
+    @media(max-width:700px){.layout{grid-template-columns:1fr}.layout>aside{display:none}footer{padding:12px;gap:8px}[contenteditable]{min-width:0}header{padding:12px}.messages{padding:16px}}
     body[data-theme="dark"] { color:#f0f2f1; background:#161717; }
     body[data-theme="dark"] aside { background:#161717; border-color:#383c3b; }
     body[data-theme="dark"] aside p,
@@ -52,8 +54,9 @@
   </style>
 </head>
 <body>
+  <div id="app">
   <div class="fixture-banner">TEST FIXTURE · fictional messages · no WhatsApp connection · no messages can be sent</div>
-  <div class="layout">
+  <div class="layout two">
     <aside>
       <h1>Chats</h1>
       <p>A local conversation for testing the extension.</p>
@@ -69,6 +72,7 @@
       <section class="messages" aria-label="Conversation"></section>
       <footer><div role="textbox" aria-label="Type a message" title="Type a message" contenteditable="true" data-tab="10" data-testid="conversation-compose-box-input"></div><button id="send" aria-label="Send">➤</button></footer>
     </main>
+  </div>
   </div>
   <script src="fixture.js"></script>
 </body>

@@ -92,6 +92,8 @@ try {
   });
   if (process.env.COPILOT_ADAPTER_ONLY !== '1') {
     await page.evaluate(installMockRuntime,fixture.url);
+    await page.addScriptTag({path:path.join(projectRoot,'extension/layout.js')});
+    await page.addScriptTag({path:path.join(projectRoot,'extension/commitments.js')});
     await page.addScriptTag({path:path.join(projectRoot,'extension/content.js')});
     await runInterfaceTests(page,check);
     await mkdir(path.join(projectRoot,'demo'),{recursive:true});
@@ -214,6 +216,37 @@ async function runInterfaceTests(page,check) {
     assert.match(event.start,/2026-10-30/);
     assert.equal(await page.evaluate(()=>fixture.sendCount),0);
   });
+  await check('Calendar account selection is saved, applied to review, and can return to the browser default',async()=>{
+    assert.equal(await page.locator('#threadlight-root').getByText('Review the details, then save in Google Calendar.',{exact:true}).count(),0);
+    await page.getByTestId('calendar-account').fill('alex.calendar@example.com');
+    const before=await page.evaluate(()=>mockBridge.calendars.length);
+    await page.getByTestId('calendar-open').click();
+    assert.equal(await page.evaluate(()=>mockBridge.calendars.length),before,'Unsaved account choice blocks review');
+    await page.getByTestId('calendar-save-account').click();
+    await page.waitForFunction(()=>mockBridge.calendarAccount==='alex.calendar@example.com');
+    await page.getByTestId('calendar-open').click();
+    assert.equal(await page.evaluate(()=>mockBridge.calendars.at(-1).calendarAccount),'alex.calendar@example.com');
+    await page.getByTestId('calendar-manage-account').click();
+    const request=await page.evaluate(()=>mockBridge.requests.filter(r=>r.type==='OPEN_CALENDAR_ACCOUNT').at(-1));
+    assert.equal(request.event,undefined);assert.equal(request.text,undefined,'Account management carries no selected message');
+    await page.evaluate(()=>mockBridge.dispatch({type:'UI_CALENDAR_ACCOUNT_CHANGED',calendarAccount:'second@example.com'}));
+    assert.equal(await page.getByTestId('calendar-account').inputValue(),'second@example.com');
+    await page.getByTestId('calendar-default-account').click();
+    await page.waitForFunction(()=>mockBridge.calendarAccount==='');
+    assert.equal(await page.getByTestId('calendar-account').inputValue(),'');
+  });
+  await check('synthetic page clicks and shortcuts cannot invoke AI or open a Calendar event',async()=>{
+    const count=()=>page.evaluate(()=>mockBridge.requests.filter(r=>['GENERATE','OPEN_CALENDAR','OPEN_CALENDAR_ACCOUNT'].includes(r.type)).length);
+    const before=await count();
+    await page.evaluate(()=>{
+      const root=document.querySelector('#threadlight-root').shadowRoot;
+      for(const id of ['generate','calendar-prepare','find-tasks','calendar-manage-account'])root.getElementById(id).click();
+      root.querySelector('[data-testid=calendar-open]').click();
+      for(const id of ['prompt','calendar-prompt'])root.getElementById(id).dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true}));
+    });
+    await page.waitForTimeout(100);
+    assert.equal(await count(),before);
+  });
   await check('an ambiguous calendar event requires dates and explicit review',async () => {
     const before=await page.evaluate(()=>{mockBridge.calendarNeedsClarification=true;return mockBridge.calendars.length;});
     await generateUI(page,'calendar-prepare');
@@ -257,8 +290,14 @@ async function runInterfaceTests(page,check) {
     await page.getByTestId('tab-tasks').click();
     await page.locator('#threadlight-root').locator('#find-tasks').click();
     await page.locator('#threadlight-root').locator('.task-title').filter({hasText:'Send the final design'}).waitFor();
+    const card=page.locator('#threadlight-root').locator('.task').first();
+    assert.doesNotMatch(await card.innerText(),/ABCDEF123456789|sender:|timestamp:/);
+    assert.match(await card.locator('.task-source').innerText(),/Could you send the final version/);
+    assert.match(await card.locator('.task-attribution').innerText(),/Alex Rao · 27 Oct 2026 · 09:35/);
+    assert.match(await card.locator('.task-meta').innerText(),/Due 29 Oct 2026/);
+    await page.screenshot({path:path.join(projectRoot,'demo/commitments-preview.png'),fullPage:true});
     await page.locator('#threadlight-root').getByRole('button',{name:'Done',exact:true}).click();
-    await page.waitForFunction(()=>document.querySelector('#threadlight-root').shadowRoot.querySelector('.task-meta').textContent.includes('done'));
+    await page.waitForFunction(()=>document.querySelector('#threadlight-root').shadowRoot.querySelector('.task-status').textContent==='Done');
     await page.getByTestId('tab-write').click();
   });
   await check('switching between different displayed names clears old suggestions',async () => {

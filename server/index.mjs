@@ -117,6 +117,8 @@ export async function createBridge({ configPath, env = process.env, fetchImpl = 
         if (!equal(token, config.get().pairingToken)) throw new AppError('The extension is not paired. Copy the pairing token from local setup into extension settings.', 401, 'NOT_PAIRED');
         if (active >= 2) throw new AppError('Two requests are already running. Wait for one to finish.', 429, 'BUSY');
         const input = validateInput(await readJSON(req));
+        // More requests can finish reading their bodies while this one awaits.
+        if (active >= 2) throw new AppError('Two requests are already running. Wait for one to finish.', 429, 'BUSY');
         if (!config.public().ready) throw new AppError('Add an OpenAI API key in local setup before generating suggestions.', 503, 'NOT_CONFIGURED');
         active++;
         const controller = new AbortController();

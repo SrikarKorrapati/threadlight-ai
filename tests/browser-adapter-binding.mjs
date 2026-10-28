@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createMemoryStore, captureMessages, LIMITS } from '../extension/memory.js';
 const { chromium } = await import(process.env.COPILOT_PLAYWRIGHT || 'playwright');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const browser = await chromium.launch({ headless: true, ...(process.env.COPILOT_CHROMIUM ? { executablePath: process.env.COPILOT_CHROMIUM } : {}) });
@@ -34,6 +35,33 @@ try {
     assert.deepEqual(s.messages.map(m => m.id), ['OPAQUEIN001', 'OPAQUEOUT002', 'album-OPAQUEA-OPAQUEB-4']);
     assert.equal(s.messages[0].text, 'Their wording.'); assert.equal(s.messages[1].text, 'My wording.');
     assert.equal(s.messages[2].kind, 'image'); assert.match(s.messages[2].text, /contents not captured/);
+  });
+  await check('oversized DOM messages are explicitly shortened without losing regular rows or splitting Unicode', async () => {
+    const originals = ['🙂'.repeat(8000), 'A' + '🙂'.repeat(8000)];
+    await page.evaluate(values => {
+      for (const [index, value] of values.entries()) {
+        const row = document.createElement('div'); row.className = index ? 'message-out' : 'message-in'; row.dataset.id = 'LONG' + index;
+        const span = document.createElement('span'); span.className = 'selectable-text'; span.textContent = value; row.append(span); document.getElementById('messages').append(row);
+      }
+    }, originals);
+    const s = await snapshot(); assert.equal(s.messages.length, 5);
+    assert.equal(s.messages[0].text, 'Their wording.'); assert.equal(s.messages[1].text, 'My wording.');
+    for (const [index, original] of originals.entries()) {
+      const body = s.messages.find(message => message.id === 'LONG' + index).text;
+      assert.ok(body.length <= LIMITS.messageText);
+      assert.match(body, /\n\[Message truncated: remaining text was not captured\.\]$/);
+      const prefix = body.slice(0, body.lastIndexOf('\n['));
+      assert.equal(prefix, original.slice(0, prefix.length)); assert.ok(body.isWellFormed());
+    }
+    const captured = captureMessages(createMemoryStore(), 'Personal', s.chat, s.messages);
+    assert.equal(captured.memory.messages.length, 5, 'The real storage transaction accepts regular and bounded messages together');
+    assert.throws(() => captureMessages(createMemoryStore(), 'Personal', s.chat, [{ id: 'raw-import', direction: 'in', text: originals[0] }]), /Message text/, 'Raw imports retain strict validation');
+  });
+  await check('a message exactly at the storage limit is retained without a truncation notice', async () => {
+    const original = 'x'.repeat(LIMITS.messageText - 2) + '🙂';
+    await page.evaluate(value => { document.querySelector('.message-out .selectable-text').textContent = value; }, original);
+    const s = await snapshot(); assert.equal(s.messages.find(message => message.direction === 'out').text, original);
+    assert.equal(captureMessages(createMemoryStore(), 'Personal', s.chat, s.messages).memory.messages.length, 3);
   });
   await check('name identity normalizes Unicode NFC and whitespace while preserving case', async () => {
     await rename('  Jose\u0301\u00a0\n  Rao  ');
@@ -179,6 +207,13 @@ try {
       const b = document.createElement('button'); b.textContent = 'Use'; shadow.append(b); b.click(); document.getElementById('composer').click();
     });
     assert.equal((await snapshot()).viewId, before.viewId);
+    await page.evaluate(() => {
+      const search = document.createElement('input'); search.id = 'contact-search'; search.type = 'search';
+      document.querySelector('nav').append(search);
+      const editable = document.createElement('div'); editable.id = 'editable-search'; editable.contentEditable = 'true'; editable.setAttribute('role', 'textbox'); editable.textContent = 'Search'; document.querySelector('nav').append(editable);
+    });
+    await page.locator('#contact-search').click(); await page.locator('#editable-search').click();
+    assert.equal((await snapshot()).viewId, before.viewId, 'Focusing sidebar search controls keeps the active conversation');
     await page.locator('#other').click();
     const after = await snapshot(); assert.ok(after.viewId > before.viewId); assert.equal(after.chat.id, before.chat.id);
   });

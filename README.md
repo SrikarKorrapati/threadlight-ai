@@ -4,7 +4,7 @@ A context-aware, multimodal writing assistant for WhatsApp Web, built with a Man
 
 Select text in WhatsApp, describe the change you want, and choose from three OpenAI suggestions. Use the explicit **Suggest a reply** action to draft a response using that conversation's captured context and your writing style.
 
-The interface follows WhatsApp Web’s light or dark appearance, with opaque surfaces, green controls, and readable system typography. This is an unpacked Chrome/Chromium extension and a local Node service. It is a personal prototype, not an official WhatsApp integration. Historical question-answering is intentionally absent.
+The interface follows WhatsApp Web’s light or dark appearance. Opening Threadlight reserves space beside the chat; windows narrower than 1,200 pixels use a bottom split. Closing it restores WhatsApp’s full size. This is an unpacked Chrome/Chromium extension and a local Node service. It is a personal prototype, not an official WhatsApp integration. Historical question-answering is intentionally absent.
 
 ![Threadlight assistant in a fictional WhatsApp conversation](demo/preview.png)
 
@@ -27,8 +27,8 @@ Keep the terminal running while you use the assistant. Press Ctrl+C there to sto
 - **Suggest a reply.** Use the explicit button, optionally describe what you want to convey, and generate three responses. The current conversation, outgoing-message examples, accepted rewrites, and saved preferences supply context.
 - **Use a draft.** Insert or copy a suggestion. A selected portion of your draft can be replaced without changing the rest. If the chat or draft changes after generation, insertion is refused so your new text is not overwritten. The extension never clicks Send.
 - **Automatic conversation memory.** Loaded messages are captured and updated locally as you chat, including while the assistant panel is closed. Switching chats selects memory using the displayed contact or group name, within your configured WhatsApp account label. Scroll up to capture older loaded messages, or import a `.txt` export in Memory. For text imports, enter your exact sender name as it appears in the export. Names are normalized for whitespace and Unicode while preserving case. Matching names share history; renaming a contact selects a different history. The update preserves uniquely matching legacy histories; ambiguous legacy records remain stored without being merged.
-- **Calendar.** Select a message and choose Calendar to open its dedicated tab. Review/edit the date, time, location, and notes. Ask Threadlight opens the separate writing tools. Missing details stay unresolved until you supply them. **Review in Google Calendar** opens a prefilled event; you must press **Save** in Google Calendar. The extension does not silently create events or invite participants.
-- **Commitments.** Click **Find commitments** to review possible promises from retained history. Mark them done or dismissed. This is an on-demand inbox, not an always-running monitor or notification system.
+- **Calendar.** Select a message and choose Calendar to open its dedicated tab. Review/edit the date, time, location, and notes. Ask Threadlight opens the separate writing tools. Missing details stay unresolved until you supply them. **Review in Google Calendar** opens a prefilled event; you must press **Save** in Google Calendar. Choose a Google account email in Calendar and save it, or use the browser default. **Add / change** opens Google’s account chooser; sign in there, then save the desired email in Threadlight. This selects the account for the prefilled event without OAuth access. The extension does not silently create events or invite participants.
+- **Commitments.** Click **Find commitments** to review possible promises from retained history. Cards show the owner, readable due date, status, and a short source quote with attribution. Technical message IDs are omitted from recognized metadata; the original source remains available internally for Calendar. Mark them done or dismissed. This is an on-demand inbox, not an always-running monitor or notification system.
 
 ## Images, voice notes, documents, and video
 
@@ -55,7 +55,7 @@ Images, transcripts, names, and dates can be misinterpreted. Review suggestions 
 - Before sending text to the Responses API, the bridge redacts exact configured credentials and recognizable long OpenAI project/service-account keys from prompts, history, preferences, text attachments, and transcripts. This is not a general sensitive-data detector. It does not redact binary images, PDFs, audio, or video; audio is uploaded for transcription before transcript filtering.
 - Default models: `gpt-5-mini` for text/images/documents, `gpt-transcribe` for audio. Change the names in local setup if your account uses different compatible models. Image/PDF/structured-output support depends on the selected model.
 - `OPENAI_API_KEY` can be supplied as an environment variable instead of through setup. A locally saved key takes precedence.
-- Memory retains up to 1,200 messages / roughly 650 KB per conversation and is also bounded across the browser profile. Coverage/removal indicators show limits. Retained history is searched and recent turns are supplied within a request budget; this is not guaranteed access to every historical message.
+- Long loaded messages are capped at 12,000 characters with a visible truncation marker. Memory retains up to 1,200 messages / roughly 650 KB per conversation and is also bounded across the browser profile. Coverage/removal indicators show limits. Retained history is searched and recent turns are supplied within a request budget; this is not guaranteed access to every historical message.
 - **Switching WhatsApp accounts:** change the account label in extension settings, then reload WhatsApp before continuing. The label separates accounts; the DOM integration cannot independently verify which account is signed in.
 - **Clear conversation** clears its local memory and learning examples. Automatic capture resumes as messages change. Closing the panel does not stop capture; close WhatsApp Web or disable the extension to stop it. Deleting browser extension data also removes local memory. Protect your browser profile and disk as you would other personal data.
 
@@ -75,13 +75,15 @@ npm test
 npm run test:browser
 npm run test:adapter
 npm run test:theme
+npm run test:layout
+npm run test:lifecycle
 npm run test:extension
 npm run test:setup
 ```
 
 Unit/integration tests cover contact/account isolation, deduplication, retention, key access, source timestamps, stale writes, calendar validation, real OpenAI request construction with injected responses, no-key errors, and FFmpeg preprocessing. Browser tests use isolated Chromium profiles and fictional WhatsApp-shaped fixtures; they do not access your personal browser or send messages. Model responses in test fixtures are explicitly simulated. Production code does not produce fake suggestions when an API key is missing.
 
-Live OpenAI text, image, audio, video, and calendar checks succeeded using fictional data. The extension was reloaded in a logged-in Brave session: automatic name selection, saved self-chat history, the removed phone/Progress UI, and the separate Calendar screen were verified. Automated checks include history updates while the panel is closed. Version 0.2.1 additionally passed 12 theme checks and was visually verified against WhatsApp’s dark appearance. Generation and insertion in real WhatsApp remain unverified. See `VALIDATION.md` for the scope and remaining checks. The demonstration screenshot uses synthetic contacts and simulated suggestions.
+Live OpenAI text, image, audio, video, and calendar checks succeeded using fictional data. The extension was reloaded in a logged-in Brave session: automatic name selection, saved self-chat history, the removed phone/Progress UI, and the separate Calendar screen were verified. Automated checks include history updates while the panel is closed. Version 0.2.2 adds reserved layout space, Google account selection, clearer commitment cards, and fixes from a full architecture review. See `ARCHITECTURE.md` for the component boundaries and review findings. Generation and insertion in real WhatsApp remain unverified. See `VALIDATION.md` for the scope and remaining checks. The demonstration screenshot uses synthetic contacts and simulated suggestions.
 
 ## Project map
 
