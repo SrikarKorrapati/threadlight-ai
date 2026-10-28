@@ -1,0 +1,215 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createBackground, buildCalendarUrl, validateSettings, STORAGE_KEYS } from '../extension/background.js';
+import { validateInput } from '../server/validation.mjs';
+
+const chat = { id: 'person@c.us', name: 'Person' };
+const extensionId = 'a'.repeat(32);
+const content = { id: extensionId, url: 'https://web.whatsapp.com/', tab: { id: 1 }, frameId: 0 };
+const options = { id: extensionId, url: `chrome-extension://${extensionId}/options.html` };
+const aiResult = () => ({ suggestions: [], feedback: [], commitments: [], explanation: '', event: null, mediaNotes: [] });
+const request = () => ({ type: 'GENERATE', chat, mode: 'reply', text: '', prompt: '', attachments: [], now: '2026-10-28T09:00:00Z', timeZone: 'Asia/Kolkata' });
+
+function harness({ saved = {}, fetchImpl, timers } = {}) {
+  const data = structuredClone(saved);
+  const tabs = [];
+  const broadcasts = [];
+  const accesses = [];
+  let networkCalls = 0;
+  const chromeApi = {
+    runtime: { id: extensionId, getURL: path => `chrome-extension://${extensionId}/${path}`, openOptionsPage: async () => {} },
+    storage: {
+      local: { setAccessLevel: async value => accesses.push(['local', value]), get: async () => structuredClone(data), set: async value => Object.assign(data, structuredClone(value)) },
+      session: { setAccessLevel: async value => accesses.push(['session', value]) },
+    },
+    tabs: { create: async value => tabs.push(value), query: async () => [{ id: 1 }], sendMessage: async (id, value) => broadcasts.push({ id, value }) },
+  };
+  const fetcher = async (...args) => { networkCalls++; return fetchImpl ? fetchImpl(...args) : { ok: true, json: async () => ({ ok: true, result: aiResult() }) }; };
+  const background = createBackground({ chromeApi, fetchImpl: fetcher, ...(timers ? { timers } : {}) });
+  return { background, data, tabs, broadcasts, accesses, networkCalls: () => networkCalls, chromeApi };
+}
+const paired = { bridgeUrl: 'http://127.0.0.1:4318', pairingToken: 'secret-pairing-token', accountLabel: 'Personal' };
+
+test('content scripts cannot read or modify the pairing token, including through GET_STATE', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  await h.background.ready;
+  assert.ok(h.accesses.every(([, value]) => value.accessLevel === 'TRUSTED_CONTEXTS'));
+  assert.equal((await h.background.handleMessage({ type: 'GET_SETTINGS' }, content)).ok, false);
+  assert.equal((await h.background.handleMessage({ type: 'SAVE_SETTINGS', settings: paired }, content)).ok, false);
+  const state = await h.background.handleMessage({ type: 'GET_STATE', chat }, content);
+  assert.equal(JSON.stringify(state).includes('secret-pairing-token'), false);
+  assert.equal((await h.background.handleMessage({ type: 'GET_SETTINGS' }, options)).settings.pairingToken, paired.pairingToken);
+});
+
+test('foreign pages, child frames, and other extensions cannot issue requests', async () => {
+  const h = harness();
+  for (const sender of [{ ...content, url: 'https://evil.example' }, { ...content, frameId: 1 }, { ...content, id: 'other-extension' }, { ...options, url: `${options.url}?fake=true` }]) {
+    assert.equal((await h.background.handleMessage({ type: 'GET_STATE', chat }, sender)).ok, false);
+  }
+  assert.equal(h.networkCalls(), 0);
+});
+
+test('loading, capturing, and acceptance do not make automatic external requests', async () => {
+  const h = harness();
+  await h.background.handleMessage({ type: 'GET_STATE', chat }, content);
+  await h.background.handleMessage({ type: 'CAPTURE', chat, messages: [{ id: '1', text: 'Hello', direction: 'out', sender: 'Me', timestamp: '', kind: 'text' }] }, content);
+  await h.background.handleMessage({ type: 'ACCEPT', chat, original: 'helo', suggestion: { text: 'hello' }, action: 'copy', feedback: [] }, content);
+  assert.equal(h.networkCalls(), 0);
+  const restarted = harness({ saved: h.data });
+  assert.equal((await restarted.background.handleMessage({ type: 'GET_STATE', chat }, content)).stats.acceptedRewrites, 1);
+});
+
+test('failed persistence does not leave a misleading worker-only memory update', async () => {
+  const h = harness();
+  await h.background.ready;
+  h.chromeApi.storage.local.set = async () => { throw new Error('Storage quota exceeded'); };
+  const result = await h.background.handleMessage({ type: 'CAPTURE', chat, messages: [{ id: '1', text: 'Unsaved draft', direction: 'out' }] }, content);
+  assert.equal(result.ok, false);
+  assert.equal((await h.background.handleMessage({ type: 'GET_STATE', chat }, content)).memory.messages.length, 0);
+});
+
+test('generation sends only the selected account/chat context and uses Bearer auth', async () => {
+  let body, headers;
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired }, fetchImpl: async (url, init) => {
+    assert.equal(url, 'http://127.0.0.1:4318/api/generate');
+    body = JSON.parse(init.body); headers = init.headers;
+    return { ok: true, json: async () => ({ ok: true, result: aiResult() }) };
+  } });
+  await h.background.handleMessage({ type: 'CAPTURE', chat, messages: [{ id: '1', text: 'Allowed context', direction: 'out' }] }, content);
+  await h.background.handleMessage({ type: 'CAPTURE', chat: { id: 'someone-else', name: 'Person' }, messages: [{ id: '2', text: 'Other person secret', direction: 'in' }] }, content);
+  const result = await h.background.handleMessage(request(), content);
+  assert.equal(result.ok, true);
+  assert.equal(headers.Authorization, `Bearer ${paired.pairingToken}`);
+  assert.equal(body.messages.length, 1);
+  assert.equal(body.messages[0].text, 'Allowed context');
+  assert.equal(JSON.stringify(body).includes('Other person secret'), false);
+  assert.doesNotThrow(() => validateInput(body));
+});
+
+test('writing feedback is opt-in and only for a rewrite of confirmed own writing', async () => {
+  const flags = [];
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired }, fetchImpl: async (_url, init) => {
+    flags.push(JSON.parse(init.body).trackWriting);
+    return { ok: true, json: async () => ({ ok: true, result: { ...aiResult(), feedback: [{ category: 'Grammar', original: 'I has', improved: 'I have', reason: 'Agreement' }] } }) };
+  } });
+  assert.equal((await h.background.handleMessage({ ...request(), mode: 'rewrite', text: 'I has' }, content)).result.feedback.length, 0);
+  assert.equal((await h.background.handleMessage({ ...request(), mode: 'rewrite', text: 'I has', trackWriting: true }, content)).result.feedback.length, 1);
+  assert.equal((await h.background.handleMessage({ ...request(), trackWriting: true }, content)).result.feedback.length, 0);
+  assert.deepEqual(flags, [false, true, false]);
+});
+
+test('raw selected-message timestamps pass through without guessing their locale', async () => {
+  let sourceTimestamp;
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired }, fetchImpl: async (_url, init) => {
+    const body = JSON.parse(init.body);
+    sourceTimestamp = body.sourceTimestamp;
+    assert.doesNotThrow(() => validateInput(body));
+    return { ok: true, json: async () => ({ ok: true, result: aiResult() }) };
+  } });
+  const result = await h.background.handleMessage({ ...request(), mode: 'explain', text: 'Meet tomorrow', sourceTimestamp: '10:30, 28/10/2026' }, content);
+  assert.equal(result.ok, true);
+  assert.equal(sourceTimestamp, '10:30, 28/10/2026');
+});
+
+test('forgetting during generation prevents an in-flight commitment from restoring deleted memory', async () => {
+  let resolveResponse;
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired }, fetchImpl: () => new Promise(resolve => { resolveResponse = resolve; }) });
+  const pending = h.background.handleMessage(request(), content);
+  while (!resolveResponse) await new Promise(resolve => setImmediate(resolve));
+  await h.background.handleMessage({ type: 'FORGET_CHAT', chat }, content);
+  resolveResponse({ ok: true, json: async () => ({ ok: true, result: { ...aiResult(), commitments: [{ title: 'Private task', due: '', owner: 'Me', source: '' }] } }) });
+  assert.equal((await pending).ok, true);
+  assert.equal((await h.background.handleMessage({ type: 'GET_STATE', chat }, content)).memory.tasks.length, 0);
+});
+
+test('changing account namespace isolates future reads and generation', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  await h.background.handleMessage({ type: 'CAPTURE', chat, messages: [{ id: '1', text: 'Personal secret', direction: 'out' }] }, content);
+  await h.background.handleMessage({ type: 'SAVE_SETTINGS', settings: { ...paired, accountLabel: 'Work' } }, options);
+  const state = await h.background.handleMessage({ type: 'GET_STATE', chat }, content);
+  assert.equal(state.settings.accountLabel, 'Work');
+  assert.equal(state.memory.messages.length, 0);
+  assert.deepEqual(h.broadcasts, [{ id: 1, value: { type: 'UI_ACCOUNT_CHANGED' } }]);
+});
+
+test('stale accepted suggestions and generation requests cannot cross an account switch', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  await h.background.handleMessage({ type: 'SAVE_SETTINGS', settings: { ...paired, accountLabel: 'Work' } }, options);
+  const accepted = await h.background.handleMessage({ type: 'ACCEPT', accountLabel: 'Personal', chat, original: 'I has', suggestion: { text: 'I have' }, action: 'copy', feedback: [{ category: 'Grammar' }] }, content);
+  const generated = await h.background.handleMessage({ ...request(), accountLabel: 'Personal' }, content);
+  assert.equal(accepted.ok, false);
+  assert.equal(generated.ok, false);
+  assert.match(accepted.error, /account changed/);
+  assert.match(generated.error, /account changed/);
+  assert.equal(h.networkCalls(), 0);
+  const state = await h.background.handleMessage({ type: 'GET_STATE', chat }, content);
+  assert.equal(state.stats.acceptedRewrites, 0);
+});
+
+test('account switch settings persist when a WhatsApp tab cannot receive its reset message', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  h.chromeApi.tabs.sendMessage = async () => { throw new Error('Tab unavailable'); };
+  const result = await h.background.handleMessage({ type: 'SAVE_SETTINGS', settings: { ...paired, accountLabel: 'Work' } }, options);
+  assert.equal(result.ok, true);
+  assert.equal(result.settings.accountLabel, 'Work');
+});
+
+test('bridge settings reject remote hosts, embedded credentials and path-based token exfiltration', () => {
+  for (const bridgeUrl of ['https://evil.example', 'http://localhost:4318', 'http://127.0.0.1:4318/redirect', 'http://user@127.0.0.1:4318', 'http://127.0.0.1:4318?target=evil', 'http://127.0.0.1:4319']) {
+    assert.throws(() => validateSettings({ ...paired, bridgeUrl }));
+  }
+});
+
+test('calendar draft preserves offset, encodes text, and never adds invitees or saves an event', async () => {
+  const event = { title: 'Design & review', start: '2026-10-29T10:30:00+05:30', end: '2026-10-29T11:00:00+05:30', timeZone: 'Asia/Kolkata', location: 'Studio A', description: 'Check a=b & c=d', attendees: ['nobody@example.com'] };
+  const url = new URL(buildCalendarUrl(event));
+  assert.equal(url.origin, 'https://calendar.google.com');
+  assert.equal(url.searchParams.get('dates'), '20261029T050000Z/20261029T053000Z');
+  assert.equal(url.searchParams.get('text'), event.title);
+  assert.equal(url.searchParams.has('add'), false);
+  assert.equal(url.toString().includes('nobody'), false);
+  const h = harness();
+  assert.deepEqual(await h.background.handleMessage({ type: 'OPEN_CALENDAR', event }, content), { ok: true, opened: true });
+  assert.equal(h.tabs.length, 1);
+  assert.equal(h.networkCalls(), 0);
+});
+
+test('ambiguous, impossible, reversed or timezone-less event dates are rejected', () => {
+  const valid = { title: 'Meeting', start: '2026-10-29T10:00:00Z', end: '2026-10-29T11:00:00Z', timeZone: 'UTC' };
+  for (const patch of [{ needsClarification: true }, { start: '' }, { start: '2026-02-30T10:00:00Z' }, { start: '2026-10-29T10:00:00' }, { start: '2026-10-29T25:00:00Z' }, { end: '2026-10-28T11:00:00Z' }, { timeZone: 'Unknown/Moon' }]) {
+    assert.throws(() => buildCalendarUrl({ ...valid, ...patch }));
+  }
+});
+
+test('invalid or oversized attachments never leave the extension', async () => {
+  const h = harness({ saved: { [STORAGE_KEYS.settings]: paired } });
+  for (const attachments of [[{ name: 'bad.png', mime: 'image/png', data: 'not base64!' }], Array.from({ length: 5 }, () => ({ name: 'a.txt', mime: 'text/plain', data: 'YQ==' }))]) {
+    assert.equal((await h.background.handleMessage({ ...request(), attachments }, content)).ok, false);
+  }
+  assert.equal(h.networkCalls(), 0);
+});
+
+test('request-only MV3 keepalive and timeout timers are cleared after success and failure', async () => {
+  for (const fail of [false, true]) {
+    const active = new Map();
+    const intervalDelays = [];
+    let nextId = 0, platformCalls = 0;
+    const timers = {
+      setTimeout: (fn, ms) => { const id = ++nextId; active.set(id, { fn, ms, type: 'timeout' }); return id; },
+      clearTimeout: id => active.delete(id),
+      setInterval: (fn, ms) => { const id = ++nextId; active.set(id, { fn, ms, type: 'interval' }); intervalDelays.push(ms); return id; },
+      clearInterval: id => active.delete(id),
+    };
+    const h = harness({ saved: { [STORAGE_KEYS.settings]: paired }, timers, fetchImpl: async () => {
+      for (const timer of active.values()) if (timer.type === 'interval') timer.fn();
+      if (fail) throw new Error('Model unavailable');
+      return { ok: true, json: async () => ({ ok: true, result: aiResult() }) };
+    } });
+    h.chromeApi.runtime.getPlatformInfo = async () => { platformCalls++; return { os: 'test' }; };
+    const result = await h.background.handleMessage(request(), content);
+    assert.equal(result.ok, !fail);
+    assert.deepEqual(intervalDelays, [20000]);
+    assert.equal(platformCalls, 1);
+    assert.equal(active.size, 0);
+  }
+});

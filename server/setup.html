@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Threadlight · Local setup</title><link rel="stylesheet" href="/setup.css"><script src="/setup.js" defer></script></head>
+<body>
+  <header class="topbar"><a class="brand" href="/"><span class="brand-mark">t<span>·</span></span> Threadlight</a><span class="local-badge"><i></i> Running on this computer</span></header>
+  <main>
+    <section class="hero"><span class="eyebrow">YOUR WORDS, WITH A LITTLE HELP</span><h1>A little context.<br>A better reply.</h1><p>Connect your AI account, pair your browser, and keep the conversation flowing.</p></section>
+    <section class="setup-grid" aria-label="Local setup">
+      <article class="card"><div class="card-heading"><span class="step">01</span><span class="status" id="status">Checking connection</span></div><h2>Connect your AI</h2><p class="muted">Your API key stays on this computer. It is never shared with WhatsApp or the browser extension.</p>
+        <form id="setup-form"><label for="api-key">OpenAI API key</label><div class="field-with-button"><input id="api-key" name="apiKey" type="password" autocomplete="new-password" placeholder="sk-…" spellcheck="false"><button type="button" id="toggle-key" class="subtle">Show</button></div><p class="hint" id="key-hint">Add a key from your OpenAI API account. API usage is billed separately from ChatGPT.</p>
+          <details><summary>Model preferences</summary><div class="model-fields"><label for="model">Writing and understanding</label><input id="model" value="gpt-5-mini" spellcheck="false"><label for="transcription">Voice transcription</label><input id="transcription" value="gpt-transcribe" spellcheck="false"><p class="hint">Use models available to your API account. Writing needs structured output; images and PDFs also need vision support.</p></div></details>
+          <div class="form-actions"><button type="submit" class="primary" id="save">Save connection <span>↗</span></button><button type="button" class="text-button" id="clear-key" hidden>Remove saved key</button></div>
+        </form><div id="notice" role="status" aria-live="polite"></div>
+      </article>
+      <article class="card"><div class="card-heading"><span class="step">02</span><span class="tag">ONE-TIME SETUP</span></div><h2>Pair your extension</h2><p class="muted">Open the extension’s settings, paste this pairing token, and save. Keep the local bridge running while you use Copilot.</p>
+        <label for="pairing-token">Private pairing token</label><div class="field-with-button token-field"><input id="pairing-token" type="password" readonly aria-label="Private pairing token"><button type="button" class="subtle" id="copy-token">Copy</button></div><p class="hint">This token authorizes your extension to use the local connection. Do not share it.</p>
+        <div class="connection-info"><span>Bridge address</span><code>http://127.0.0.1:4318</code></div><button class="text-button" id="rotate-token" type="button">Replace pairing token</button><p class="hint">Replacing it disconnects extensions until you paste the new token.</p><div id="pair-notice" role="status" aria-live="polite"></div>
+      </article>
+    </section>
+    <section class="privacy-strip" aria-label="What happens to your data"><div><span class="tiny-icon">◉</span><h3>On your terms</h3><p>Only an explicit request sends the selected text, relevant chat memory and chosen attachments to OpenAI.</p></div><div><span class="tiny-icon">⌁</span><h3>More than text</h3><p id="media-status">Images, PDFs, text documents and voice notes. Checking video support…</p></div><div><span class="tiny-icon">✓</span><h3>You stay in control</h3><p>Replies remain drafts. Calendar actions open an event editor so you can review and save.</p></div></section>
+    <p class="footnote">Personal prototype · Local configuration is saved with owner-only file permissions, not encrypted. Chat memory stays in your extension profile. OpenAI processes requested content under its API data policies.</p>
+  </main>
+  <footer><span>Write clearly. Sound like yourself.</span><a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Get an API key ↗</a></footer>
+</body></html>
