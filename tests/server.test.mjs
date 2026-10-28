@@ -88,6 +88,42 @@ test('unconfigured server never generates fabricated suggestions', async t => {
   assert.equal(response.status, 503); assert.equal((await response.json()).code, 'NOT_CONFIGURED'); assert.equal(called, false);
 });
 
+test('setup link permits top-level HTML navigation while cross-site fetches and API navigation stay blocked', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'wac-setup-navigation-'));
+  const bridge = await createBridge({ configPath: join(directory, '.local/config.json'), env: {}, ffmpeg: null, port: 0, fetchImpl: async () => { throw new Error('Setup navigation must not call AI'); } });
+  const { port } = await bridge.listen(), base = `http://127.0.0.1:${port}`;
+  t.after(async () => { await bridge.close(); await rm(directory, { recursive: true, force: true }); });
+  // Raw HTTP preserves browser Fetch Metadata exactly; Node fetch sets its own mode.
+  const request = (path, headers, method = 'GET') => new Promise((resolve, reject) => {
+    const req = http.request(`${base}${path}`, { method, headers }, res => {
+      const chunks = []; res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
+    }); req.on('error', reject); req.end();
+  });
+  const navigation = { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-User': '?1', Accept: 'text/html,application/xhtml+xml' };
+  const page = await request('/', navigation);
+  assert.equal(page.status, 200); assert.match(page.headers['content-type'], /text\/html/); assert.match(page.body, /Threadlight/);
+  assert.match(page.headers['set-cookie'][0], /HttpOnly; SameSite=Strict/);
+  assert.match(page.headers['content-security-policy'], /frame-ancestors 'none'/);
+  const cookie = page.headers['set-cookie'][0].split(';')[0];
+  const extension = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const extensionPage = await request('/', { ...navigation, Origin: extension });
+  assert.equal(extensionPage.status, 200); assert.equal(extensionPage.headers['access-control-allow-origin'], undefined, 'Navigation exception must not grant CORS access to setup');
+  assert.equal((await request('/', { ...navigation, 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' })).status, 403);
+  assert.equal((await request('/', { ...navigation, 'Sec-Fetch-Dest': 'iframe' })).status, 403);
+  assert.equal((await request('/', { ...navigation, Accept: 'application/json' })).status, 403);
+  assert.equal((await request('/', navigation, 'POST')).status, 403);
+  assert.equal((await request('/', { ...navigation, Host: `untrusted.example:${port}` })).status, 403);
+  assert.equal((await request('/', { ...navigation, Origin: 'https://untrusted.example' })).status, 403);
+  for (const path of ['/api/setup', '/api/health', '/api/generate', '/setup.js']) assert.equal((await request(path, { ...navigation, Cookie: cookie })).status, 403, `${path} must not inherit the navigation exception`);
+  assert.equal((await request('/api/setup', { ...navigation, Origin: extension, Cookie: cookie })).status, 403);
+  const stateResponse = await fetch(`${base}/api/setup`, { headers: { Cookie: cookie } });
+  assert.equal(stateResponse.status, 200, 'The new page can initialize its same-origin setup session');
+  const state = await stateResponse.json();
+  const csrfFailure = await fetch(`${base}/api/setup`, { method: 'POST', headers: { Cookie: cookie, Origin: base, 'Content-Type': 'application/json', 'X-CSRF-Token': `${state.csrfToken}-invalid` }, body: '{}' });
+  assert.equal(csrfFailure.status, 403, 'Setup mutations still require the session CSRF token');
+});
+
 test('generation flushes headers before the model resolves and streams valid JSON for success or failure', async t => {
   for (const fail of [false, true]) {
     await t.test(fail ? 'provider error after headers' : 'successful delayed generation', async t => {

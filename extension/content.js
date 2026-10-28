@@ -11,6 +11,7 @@
     <aside class="panel" data-testid="panel" aria-label="Threadlight writing assistant" hidden>
       <div class="header"><div class="brand-icon">${sparkle}</div><div><div class="brand">Threadlight</div><div class="eyebrow">A little more like you</div></div><span class="spacer"></span><button class="icon-btn" id="settings" aria-label="Settings">⚙</button><button class="icon-btn" id="close" aria-label="Close assistant">✕</button></div>
       <div class="chat-strip"><div class="chat-name" id="chat-name">Open a conversation</div><span class="local-pill">Personal memory</span></div>
+      <section id="chat-binding" class="notice" style="margin:12px 18px" hidden><strong>Choose whose history to use</strong><p class="muted">Confirm this contact’s phone number, including the country code, to keep their history separate. Confirm again after switching chats.</p><label for="contact-phone">Contact’s phone number</label><input id="contact-phone" data-testid="contact-phone" class="field" type="tel" autocomplete="off" placeholder="+91 98765 43210" maxlength="40" style="min-height:0"><button id="bind-contact" data-testid="bind-contact" class="secondary" style="margin-top:10px">Use this contact</button></section>
       <nav class="tabs" aria-label="Assistant sections"><button class="tab active" data-tab="write" data-testid="tab-write">Write</button><button class="tab" data-tab="memory" data-testid="tab-memory">Memory</button><button class="tab" data-tab="tasks" data-testid="tab-tasks">Commitments</button><button class="tab" data-tab="stats" data-testid="tab-stats">Progress</button></nav>
       <div class="body">
         <section id="view-write">
@@ -69,7 +70,7 @@
     requestNumber++; contextVersion++; setBusy(false); chat = next; bubblePending = null; memory = {}; stats = {}; attachments = []; lastSelection = null; fingerprint = ''; resultContext = null; ownDraft=false;
     $('#source').value = ''; $('#prompt').value = ''; $('#profile').value = ''; $('#results').replaceChildren(); renderFiles();
     $('#selection-bubble').hidden = true; $('#chat-name').textContent = next?.name || 'Open a conversation with messages'; $('#coverage').textContent = 'Only captured conversation context';
-    $('#memory-info').textContent='';renderTasks();renderStats();
+    $('#memory-info').textContent='';$('#contact-phone').value='';$('#chat-binding').dataset.name='';renderTasks();renderStats();
   }
   function updateMemory(data) {
     if(data.settings?.accountLabel)accountLabel=data.settings.accountLabel;
@@ -84,7 +85,13 @@
     if (!opened) return;
     const snap = adapter.getSnapshot(); const changed = chat?.id !== snap.chat?.id;
     if (changed) resetForChat(snap.chat);
-    if (!snap.chat) { setStatus('Open a chat with loaded messages so its identity can be verified.', true); return; }
+    const binding=snap.binding;$('#chat-binding').hidden=!binding?.required;
+    if(binding?.required){
+      $('#chat-name').textContent=binding.name||'Choose a conversation';
+      if($('#chat-binding').dataset.name!==binding.name){$('#chat-binding').dataset.name=binding.name;$('#contact-phone').value=binding.suggestedPhone||'';}
+      $('#bind-contact').disabled=!binding.canBind;
+    }
+    if (!snap.chat) { setStatus(binding?.reason || 'Open a chat with loaded messages so its identity can be verified.', true); return; }
     chat = snap.chat; $('#chat-name').textContent = chat.name; const capturedId = chat.id; const version=contextVersion;
     if (changed || force) {
       const data = await send('GET_STATE', { chat }); if (version!==contextVersion||!isCurrent({id:capturedId})) return; updateMemory(data);
@@ -224,6 +231,7 @@
     return messages.map((m,i)=>({...m,id:`import:${m.timestamp}:${m.sender}:${i}`}));
   }
   $('.launcher').onclick=safeRun(()=>openPanel());$('#close').onclick=closePanel;$('#settings').onclick=safeRun(()=>send('OPEN_SETTINGS'));
+  $('#bind-contact').onclick=safeRun(async()=>{adapter.bindConversation($('#contact-phone').value);await refresh({force:true});if(chat)setStatus('History linked to this contact. Ready when you are.');});
   $$('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
   $$('[data-mode]').forEach(b=>b.onclick=()=>{setMode(b.dataset.mode);$('#results').replaceChildren();});
   $$('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;$('#prompt').focus();});
@@ -250,6 +258,7 @@
   $('#ask-selection').onclick=safeRun(()=>openSelection('rewrite'));$('#calendar-selection').onclick=safeRun(()=>openSelection('calendar'));
   document.addEventListener('keydown',event=>{if(event.key==='Escape'){closePanel();return;}if(event.altKey&&event.shiftKey&&event.code==='KeyW'){event.preventDefault();opened?closePanel():safeRun(()=>openPanel())();}});
   $('#prompt').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();safeRun(()=>generate())();}});
-  chrome.runtime.onMessage.addListener(message=>{if(message.type==='UI_ACCOUNT_CHANGED'){accountLabel='';resetForChat(null);if(opened)safeRun(()=>refresh({force:true}))();}if(message.type==='UI_OPEN'){if(message.toggle&&opened)closePanel();else safeRun(()=>openPanel(message.mode||'rewrite',message.text))();}});
+  chrome.runtime.onMessage.addListener(message=>{if(message.type==='UI_ACCOUNT_CHANGED'){adapter.clearBinding?.();accountLabel='';resetForChat(null);if(opened)safeRun(()=>refresh({force:true}))();}if(message.type==='UI_OPEN'){if(message.toggle&&opened)closePanel();else safeRun(()=>openPanel(message.mode||'rewrite',message.text))();}});
+  document.addEventListener('threadlight-binding-invalidated',()=>{if(opened)safeRun(()=>refresh({force:true}))();});
   new MutationObserver(()=>{if(!opened)return;clearTimeout(debounce);debounce=setTimeout(()=>refresh().catch(e=>setStatus(e.message,true)),280);}).observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['data-id','title']});
 })();

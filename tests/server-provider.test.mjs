@@ -31,6 +31,69 @@ test('provider passes actual multimodal inputs and preserves conversation bounda
   assert.equal(output.mediaNotes.length, 2);
 });
 
+test('provider redacts configured and high-confidence credentials throughout text while preserving authorization and ordinary wording', async () => {
+  const credentials = { ...config, apiKey: `sk-local-test-${'C'.repeat(32)}`, pairingToken: `pairing-test-${'D'.repeat(44)}` };
+  const projectKey = `sk-proj-${'A'.repeat(64)}`, serviceKey = `sk-svcacct-${'B'.repeat(64)}`;
+  const ordinary = 'Please send the design tomorrow. Keep sk-proj-demo and sk-svcacct-example as written.';
+  const input = sample();
+  input.text = `${ordinary} ${credentials.apiKey}`;
+  input.prompt = `Explain ${projectKey}, ${serviceKey} and ${credentials.pairingToken}`;
+  input.profile = `${credentials.apiKey} ${credentials.pairingToken}`;
+  input.sourceTimestamp = credentials.apiKey;
+  input.messages = [{ id: 'message-1', text: `${ordinary} ${projectKey} ${credentials.apiKey}`, sender: 'Alex', direction: 'in', timestamp: '', kind: 'text' }];
+  input.examples = [{ original: credentials.pairingToken, text: `${ordinary} ${serviceKey}` }];
+  input.attachments = [{ name: 'note.txt', mime: 'text/plain', data: Buffer.from(`${ordinary} ${credentials.apiKey} ${credentials.pairingToken} ${projectKey}`).toString('base64') }];
+  const before = JSON.stringify(input);
+  let payload;
+  await generate(input, credentials, { fetchImpl: async (_url, options) => {
+    assert.equal(options.headers.Authorization, `Bearer ${credentials.apiKey}`, 'Provider authentication must keep the actual configured key');
+    for (const secret of [credentials.apiKey, credentials.pairingToken, projectKey, serviceKey]) assert.equal(options.body.includes(secret), false, 'A credential must not appear in the Responses body');
+    payload = JSON.parse(options.body); return responseFor(result());
+  } });
+  const context = JSON.parse(payload.input[0].content[0].text);
+  assert.equal(context.conversationData.text, `${ordinary} [credential redacted]`);
+  assert.equal(context.conversationData.profile, '[credential redacted] [credential redacted]');
+  assert.equal(context.conversationData.sourceTimestamp, '[credential redacted]');
+  assert.equal(context.conversationData.examples[0].original, '[credential redacted]');
+  assert.ok(context.conversationData.messages[0].text.startsWith(ordinary));
+  assert.ok(payload.input[0].content.some(part => part.type === 'input_text' && part.text.includes('untrustedText') && part.text.includes('[credential redacted]')));
+  assert.equal(JSON.stringify(input), before, 'Redaction must not mutate stored/source conversation data');
+});
+
+test('transcription text and attachment names are redacted before Responses without changing audio authorization', async () => {
+  const credentials = { ...config, apiKey: `sk-local-test-${'E'.repeat(32)}`, pairingToken: `pairing-test-${'F'.repeat(44)}` };
+  const otherKey = `sk-proj-${'G'.repeat(64)}`;
+  const input = sample();
+  input.attachments = [{ name: `${credentials.pairingToken}.wav`, mime: 'audio/wav', data: Buffer.from('synthetic-audio-only').toString('base64') }];
+  let transcriptReachedResponses = false;
+  await generate(input, credentials, { ffmpeg: null, fetchImpl: async (url, options) => {
+    assert.equal(options.headers.Authorization, `Bearer ${credentials.apiKey}`);
+    if (url.endsWith('/transcriptions')) {
+      assert.equal(options.body.get('file').name, '[credential redacted].wav');
+      return new Response(JSON.stringify({ text: `Please send the design. ${credentials.apiKey} ${credentials.pairingToken} ${otherKey}` }), { status: 200 });
+    }
+    for (const secret of [credentials.apiKey, credentials.pairingToken, otherKey]) assert.equal(options.body.includes(secret), false);
+    const parts = JSON.parse(options.body).input[0].content;
+    const transcript = parts.filter(part => part.type === 'input_text').map(part => { try { return JSON.parse(part.text).untrustedTranscript; } catch { return undefined; } }).find(Boolean);
+    assert.equal(transcript, 'Please send the design. [credential redacted] [credential redacted] [credential redacted]');
+    transcriptReachedResponses = true; return responseFor(result());
+  } });
+  assert.equal(transcriptReachedResponses, true);
+});
+
+test('text redaction leaves binary PDF and image payloads unchanged', async () => {
+  const input = sample();
+  const pdf = Buffer.from(`%PDF-1.4 synthetic binary fixture ${config.apiKey}`).toString('base64');
+  const image = Buffer.from(`synthetic image bytes ${config.apiKey}`).toString('base64');
+  input.attachments = [{ name: 'sample.pdf', mime: 'application/pdf', data: pdf }, { name: 'sample.png', mime: 'image/png', data: image }];
+  await generate(input, config, { fetchImpl: async (_url, options) => {
+    const parts = JSON.parse(options.body).input[0].content;
+    assert.equal(parts.find(part => part.type === 'input_file').file_data, `data:application/pdf;base64,${pdf}`);
+    assert.equal(parts.find(part => part.type === 'input_image').image_url, `data:image/png;base64,${image}`);
+    return responseFor(result());
+  } });
+});
+
 test('audio is sent to transcription before the text generation request', async () => {
   const input = sample(); input.attachments = [{ name: 'recording.wav', mime: 'audio/wav', data: Buffer.from('test-audio').toString('base64') }];
   const calls = [];

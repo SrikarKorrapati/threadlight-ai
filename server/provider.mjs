@@ -4,6 +4,21 @@ import { prepareAttachments } from './media.mjs';
 const s = { type: 'string' };
 const obj = properties => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
 const arr = items => ({ type: 'array', items });
+function textRedaction(config) {
+  const known = [...new Set([config.apiKey, config.pairingToken].filter(value => typeof value === 'string' && value))].sort((a, b) => b.length - a.length);
+  const redact = text => {
+    let clean = text;
+    for (const secret of known) clean = clean.split(secret).join('[credential redacted]');
+    return clean.replace(/\bsk-(?:proj|svcacct)-[A-Za-z0-9_-]{40,}/g, '[credential redacted]');
+  };
+  const stringify = value => JSON.stringify(value, (_key, item) => typeof item === 'string' ? redact(item) : item);
+  const serializedText = text => {
+    // Attachment transcripts/plain-text files arrive wrapped in JSON. Redact
+    // decoded string values so JSON escaping cannot hide an exact credential.
+    try { return stringify(JSON.parse(text)); } catch { return redact(text); }
+  };
+  return { redact, stringify, serializedText };
+}
 export const RESULT_SCHEMA = obj({
   suggestions: arr(obj({ label: s, text: s, explanation: s })),
   explanation: s,
@@ -75,20 +90,25 @@ async function checkedFetch(fetchImpl, url, options, signal) {
 
 export async function generate(input, config, { fetchImpl = fetch, ffmpeg = null, signal = AbortSignal.timeout(150000) } = {}) {
   if (!config.apiKey) throw new AppError('Add your OpenAI API key in the local setup page before generating suggestions.', 503, 'NOT_CONFIGURED');
+  const redaction = textRedaction(config);
   const transcribe = async (bytes, name, mime, requestSignal) => {
     const form = new FormData();
     form.append('model', config.transcriptionModel);
     form.append('file', new Blob([bytes], { type: mime }), name);
     const data = await checkedFetch(fetchImpl, 'https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}` }, body: form }, requestSignal);
     if (typeof data.text !== 'string' || !data.text.trim()) throw new AppError('No speech could be transcribed from the attachment.', 422, 'NO_TRANSCRIPT');
-    return data.text.slice(0, 60000);
+    return redaction.redact(data.text.slice(0, 60000));
   };
-  const { content, notes } = await prepareAttachments(input.attachments, { ffmpeg, transcribe, signal });
+  // Only textual content/names are redacted. Binary images, PDFs, audio and
+  // video still carry their original content and are not inspected for secrets.
+  const safeAttachments = input.attachments.map(attachment => ({ ...attachment, name: redaction.redact(attachment.name) }));
+  const { content, notes } = await prepareAttachments(safeAttachments, { ffmpeg, transcribe, signal });
+  const safeContent = content.map(part => part.type === 'input_text' ? { ...part, text: redaction.serializedText(part.text) } : part);
   const { attachments, ...context } = input;
   const payload = {
     model: config.model, store: false, max_output_tokens: 6000,
     instructions: SYSTEM_PROMPT,
-    input: [{ role: 'user', content: [{ type: 'input_text', text: JSON.stringify({ operation: input.mode, userInstructions: input.prompt, conversationData: context, attachmentProcessingNotes: notes }) }, ...content] }],
+    input: [{ role: 'user', content: [{ type: 'input_text', text: redaction.stringify({ operation: input.mode, userInstructions: input.prompt, conversationData: context, attachmentProcessingNotes: notes }) }, ...safeContent] }],
     text: { format: { type: 'json_schema', name: 'whatsapp_copilot_result', strict: true, schema: RESULT_SCHEMA } },
   };
   if (['gpt-5', 'gpt-5-mini', 'gpt-5-nano'].includes(config.model)) payload.reasoning = { effort: 'low' };

@@ -4,8 +4,9 @@ Tested on 28 October 2026.
 
 ## Automated checks
 
-- 45 Node tests passed, covering memory/account separation, source dates, authenticated requests, storage failures, stale work, calendar validation, provider errors, and media processing.
-- 23 interface/DOM checks passed in isolated Chromium, covering the selection popup, free-form prompts, three suggestions, partial draft replacement, no-send behavior, stale drafts/chats/accounts, attachment selection, calendar editing, history import, and commitments.
+- 49 Node tests passed, covering memory/account separation, source dates, authenticated requests, storage failures, stale work, calendar validation, provider errors, media processing, safe setup-page navigation, and credential filtering in model text inputs.
+- 27 interface/DOM checks passed in isolated Chromium, covering the selection popup, free-form prompts, three suggestions, partial draft replacement, no-send behavior, stale drafts/chats/accounts, attachment selection, calendar editing, history import, commitments, and explicit phone confirmation before capture/generation.
+- 15 dedicated adapter checks passed, covering opaque message IDs, manual phone binding and invalidation, same-name contacts, safe draft insertion, and the observed modern `conv-msg-*`/`tail-in`/`tail-out` structure.
 - 4 actual Manifest V3 extension checks passed in a disposable Chromium profile. The WhatsApp URL was intercepted with a fictional local fixture; no real account was used.
 - 5 setup-page browser checks passed, covering local key save/removal, concealed key retrieval, pairing rotation, and narrow-screen layout.
 - JavaScript syntax checks passed.
@@ -24,10 +25,12 @@ Using a real OpenAI API connection, with fictional data only:
 
 No real WhatsApp conversations were sent during these checks. No WhatsApp messages were sent and no Google Calendar events were saved.
 
-## Remaining live integration check
+## Live Brave installation and remaining checks
 
-The extension has not yet been tested against a real logged-in WhatsApp Web account. Live compatibility with the current WhatsApp interface remains unverified.
+The extension was loaded unpacked in Brave, paired with the local service, and passed **Test connection**. Its panel opened in a real self-chat. The setup-page link initially failed on cross-site navigation; the narrowly scoped fix was verified through the real extension options link.
 
-The browser fixture proves the browser-extension mechanism and interaction logic; it does not prove that every selector matches the current WhatsApp release. All WhatsApp selectors are isolated in `extension/adapter.js` for that reason.
+Live DOM inspection found opaque message IDs and `conv-msg-*` wrappers without the legacy `.message-in`/`.message-out` classes. The adapter now handles explicit direction-tail markers and offers manual international-phone confirmation when no stable chat ID is exposed. After reloading the updated extension, a real self-chat showed the prefilled phone confirmation, accepted **Use this contact**, and displayed **History linked to this contact. Ready when you are.** with **2 captured messages · local memory**. Matching fictional regressions pass. Actual generation/insertion with real WhatsApp remains unverified; no personal chat was submitted to OpenAI during this setup check.
+
+The automated fixtures verify the mechanisms, not every live WhatsApp variant. Rows without reliable direction evidence are omitted. All WhatsApp selectors remain isolated in `extension/adapter.js`.
 
 PDF input is verified by request-shape tests and the documented OpenAI API format; a live PDF request has not been made. FFmpeg processing has been tested with real generated media, including a short H.264 clip.

@@ -261,6 +261,7 @@ async function runInterfaceTests(page,check) {
     await page.waitForFunction(()=>document.querySelector('#threadlight-root').shadowRoot.querySelector('#profile').value==='Use concise, friendly replies for the product team.');
     assert.equal(await page.getByTestId('suggestion').count(),0);
   });
+  await runOpaqueBindingTests(page,check);
   await check('Escape dismisses the panel',async () => {
     await page.keyboard.press('Escape');
     await page.getByTestId('panel').waitFor({state:'hidden'});
@@ -272,6 +273,60 @@ async function runInterfaceTests(page,check) {
   await generateUI(page);
   await page.getByTestId('suggestion').nth(2).waitFor();
   await page.setViewportSize({width:1440,height:1380});
+}
+
+async function runOpaqueBindingTests(page,check) {
+  const bindingPanel=page.locator('#threadlight-root').locator('#chat-binding');
+  const calls=()=>page.evaluate(()=>mockBridge.requests.filter(r=>r.type==='CAPTURE'||r.type==='GENERATE').length);
+  let firstId, oldInsert;
+  await check('opaque message IDs require confirmation before capture or generation',async()=>{
+    const before=await calls();
+    await page.evaluate(()=>{fixture.switchChat('a');document.querySelectorAll('#main [data-id]').forEach((node,index)=>{node.dataset.id=`opaque_a_${index}`;});});
+    await bindingPanel.waitFor({state:'visible'});
+    assert.equal(await page.evaluate(()=>WACopilot.adapter.getSnapshot().chat),null);
+    await page.getByTestId('mode-reply').click();await page.getByTestId('generate').click();await page.waitForTimeout(100);
+    assert.equal(await calls(),before,'Unconfirmed conversations must not be captured or sent to the model');
+    await page.getByTestId('contact-phone').fill('Alex Rao');await page.getByTestId('bind-contact').click();await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(()=>WACopilot.adapter.getSnapshot().chat),null);
+    assert.equal(await calls(),before,'A display name must not substitute for phone confirmation');
+  });
+  await check('confirmed phone binds opaque messages to stable per-contact history',async()=>{
+    await page.getByTestId('contact-phone').fill('+1 202 555 0142');await page.getByTestId('bind-contact').click();
+    await bindingPanel.waitFor({state:'hidden'});
+    firstId=await page.evaluate(()=>WACopilot.adapter.getSnapshot().chat.id);assert.equal(firstId,'manual:phone:+12025550142');
+    await page.waitForFunction(id=>mockBridge.requests.some(r=>r.type==='CAPTURE'&&r.chat.id===id),firstId);
+    const captured=await page.evaluate(id=>mockBridge.requests.filter(r=>r.type==='CAPTURE'&&r.chat.id===id).at(-1),firstId);
+    assert.equal(captured.messages.length,4);assert.equal(captured.messages[1].direction,'out');
+    await page.getByTestId('mode-reply').click();await generateUI(page);
+    assert.equal(await page.evaluate(()=>mockBridge.requests.filter(r=>r.type==='GENERATE').at(-1).chat.id),firstId);
+    oldInsert=await page.getByTestId('insert').first().elementHandle();
+  });
+  await check('a same-name opaque chat needs its own binding and rejects old suggestions',async()=>{
+    await page.evaluate(()=>{fixture.switchChat('b');document.querySelectorAll('#main [data-id]').forEach((node,index)=>{node.dataset.id=`opaque_b_${index}`;});});
+    await bindingPanel.waitFor({state:'visible'});assert.equal(await page.evaluate(()=>WACopilot.adapter.getSnapshot().chat),null);
+    await page.getByTestId('contact-phone').fill('+1 202 555 0188');await page.getByTestId('bind-contact').click();
+    await bindingPanel.waitFor({state:'hidden'});
+    const secondId=await page.evaluate(()=>WACopilot.adapter.getSnapshot().chat.id);
+    assert.equal(secondId,'manual:phone:+12025550188');assert.notEqual(secondId,firstId);
+    const before=await page.evaluate(()=>mockBridge.requests.filter(r=>r.type==='ACCEPT').length);
+    // Even a detached old card handler must refuse to modify the new conversation.
+    await oldInsert.evaluate(button=>button.click());await page.waitForTimeout(100);
+    assert.equal(await page.locator('#main [contenteditable]').innerText(),'sounds good see you there');
+    assert.equal(await page.evaluate(()=>mockBridge.requests.filter(r=>r.type==='ACCEPT').length),before);
+    assert.equal(await page.evaluate(()=>fixture.sendCount),0);
+    await generateUI(page);assert.equal(await page.evaluate(()=>mockBridge.requests.filter(r=>r.type==='GENERATE').at(-1).chat.id),secondId);
+    await oldInsert.dispose();
+  });
+  await check('account change clears manual binding before any further capture',async()=>{
+    const before=await calls();
+    await page.evaluate(()=>{mockBridge.accountLabel='Opaque account';mockBridge.dispatch({type:'UI_ACCOUNT_CHANGED'});});
+    await bindingPanel.waitFor({state:'visible'});assert.equal(await page.evaluate(()=>WACopilot.adapter.getSnapshot().chat),null);
+    await page.getByTestId('generate').click();await page.waitForTimeout(100);
+    assert.equal(await calls(),before);assert.equal(await page.getByTestId('suggestion').count(),0);
+    await page.evaluate(()=>{mockBridge.accountLabel='Personal';mockBridge.dispatch({type:'UI_ACCOUNT_CHANGED'});fixture.switchChat('a');});
+    await bindingPanel.waitFor({state:'hidden'});
+    await page.waitForFunction(()=>document.querySelector('#threadlight-root').shadowRoot.querySelector('#profile').value==='Use concise, friendly replies for the product team.');
+  });
 }
 
 async function generateUI(page) {

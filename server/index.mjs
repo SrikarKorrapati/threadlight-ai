@@ -64,11 +64,15 @@ export async function createBridge({ configPath, env = process.env, fetchImpl = 
       const origin = req.headers.origin;
       const ownOrigin = origin === `http://${req.headers.host}`;
       const extensionOrigin = typeof origin === 'string' && /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
-      if (origin && !ownOrigin && !extensionOrigin) throw new AppError('This origin cannot access the local bridge.', 403, 'ORIGIN_FORBIDDEN');
-      if (!origin && req.headers['sec-fetch-site'] === 'cross-site') throw new AppError('Cross-site requests are not allowed.', 403, 'ORIGIN_FORBIDDEN');
       const path = new URL(req.url, `http://${req.headers.host}`).pathname;
-      if (extensionOrigin && !['/api/generate', '/api/health'].includes(path)) throw new AppError('This endpoint is only available in local setup.', 403, 'ORIGIN_FORBIDDEN');
-      if (extensionOrigin) {
+      // A user opening the setup link from an extension is a cross-site document
+      // navigation. Permit only that HTML entry point, never API/embedded fetches.
+      const setupNavigation = req.method === 'GET' && path === '/' && req.headers['sec-fetch-mode'] === 'navigate' && req.headers['sec-fetch-dest'] === 'document' && /\btext\/html\b/i.test(req.headers.accept || '');
+      if (origin && !ownOrigin && !extensionOrigin) throw new AppError('This origin cannot access the local bridge.', 403, 'ORIGIN_FORBIDDEN');
+      if (!origin && req.headers['sec-fetch-site'] === 'cross-site' && !setupNavigation) throw new AppError('Cross-site requests are not allowed.', 403, 'ORIGIN_FORBIDDEN');
+      const extensionApi = extensionOrigin && ['/api/generate', '/api/health'].includes(path);
+      if (extensionOrigin && !extensionApi && !setupNavigation) throw new AppError('This endpoint is only available in local setup.', 403, 'ORIGIN_FORBIDDEN');
+      if (extensionApi) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Vary', 'Origin');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
