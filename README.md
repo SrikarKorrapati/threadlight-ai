@@ -17,6 +17,7 @@ The preview uses fictional contacts and simulated suggestions. See [validation r
 3. In Chrome, open `chrome://extensions`. Enable **Developer mode**, choose **Load unpacked**, and select this project's **extension** folder. Brave and other Chromium browsers may also work; the automated browser checks use Chromium.
 4. Open the extension's **Details → Extension options**. Paste the pairing token and save. Use **Test connection** to check local service readiness. This does not make a paid OpenAI call or validate the key against OpenAI.
 5. Open or reload [WhatsApp Web](https://web.whatsapp.com/). Open a chat with loaded messages, then click the **Threadlight** button or press **Alt + Shift + W**.
+6. If **Choose whose history to use** appears, confirm that person's international phone number and click **Use this contact**. This fallback is for individual chats. Confirm again after changing chats, reloading, or scrolling to a completely separate message window. Do not use a member's phone number to identify a group.
 
 Keep the terminal running while you use the assistant. Press Ctrl+C there to stop it. On macOS, `Start Threadlight.command` is a convenience launcher for the same service.
 
@@ -25,7 +26,7 @@ Keep the terminal running while you use the assistant. Press Ctrl+C there to sto
 - **Select → prompt → suggestions.** Highlight a message or part of a draft, choose **Ask Threadlight**, write instructions such as “make it friendly but direct,” and generate three options. Right-click selected text also offers rewrite, explain, and calendar actions. Ctrl/Cmd+Enter submits the prompt.
 - **Suggest a reply.** Use the explicit button, optionally describe what you want to convey, and generate three responses. The current conversation, outgoing-message examples, accepted rewrites, and saved preferences supply context.
 - **Use a draft.** Insert or copy a suggestion. A selected portion of your draft can be replaced without changing the rest. If the chat or draft changes after generation, insertion is refused so your new text is not overwritten. The extension never clicks Send.
-- **Per-conversation memory.** The Memory tab stores preferences and messages while the panel is open. Scroll up to expose older messages, or import that conversation's `.txt` export. For text imports, enter your exact sender name as it appears in the export. Messages are associated with WhatsApp's exposed chat identifier, not its display name.
+- **Per-conversation memory.** The Memory tab stores preferences and messages while the panel is open. Scroll up to expose older messages, or import that conversation's `.txt` export. For text imports, enter your exact sender name as it appears in the export. Messages are associated with WhatsApp's exposed chat identifier, or an explicitly confirmed phone number when the page exposes only opaque message IDs. Display names never select stored history automatically.
 - **Explain.** Explain the selected message in context. There is no standalone history-search or FAQ interface.
 - **Calendar.** Select a message and choose Add to calendar. Review/edit the date, time, location, and notes. Missing details stay unresolved until you supply them. **Review in Google Calendar** opens a prefilled event; you must press **Save** in Google Calendar. The extension does not silently create events or invite participants.
 - **Commitments.** Click **Find commitments** to review possible promises from retained history. Mark them done or dismissed. This is an on-demand inbox, not an always-running monitor or notification system.
@@ -53,6 +54,7 @@ Images, transcripts, names, and dates can be misinterpreted. Review suggestions 
 - The OpenAI key and pairing token are stored in `.local/config.json`, with owner-only file permissions. This is not an encrypted vault. The extension never receives the OpenAI key.
 - The extension stores its pairing token, chat memory, preferences, and writing statistics locally in the browser profile. Content scripts cannot directly access extension storage or retrieve the pairing token.
 - Context and attached files are sent to OpenAI only when you request a generation. Responses calls set `store:false`; this does not mean all provider retention policies are disabled. WhatsApp's encryption does not extend to this separate model-processing flow.
+- Before sending text to the Responses API, the bridge redacts exact configured credentials and recognizable long OpenAI project/service-account keys from prompts, history, preferences, text attachments, and transcripts. This is not a general sensitive-data detector. It does not redact binary images, PDFs, audio, or video; audio is uploaded for transcription before transcript filtering.
 - Default models: `gpt-5-mini` for text/images/documents, `gpt-transcribe` for audio. Change the names in local setup if your account uses different compatible models. Image/PDF/structured-output support depends on the selected model.
 - `OPENAI_API_KEY` can be supplied as an environment variable instead of through setup. A locally saved key takes precedence.
 - Memory retains up to 1,200 messages / roughly 650 KB per conversation and is also bounded across the browser profile. Coverage/removal indicators show limits. Retained history is searched and recent turns are supplied within a request budget; this is not guaranteed access to every historical message.
@@ -61,7 +63,7 @@ Images, transcripts, names, and dates can be misinterpreted. Review suggestions 
 
 ## Integration limits
 
-WhatsApp's DOM is not a stable public API. `extension/adapter.js` contains the selectors and identity extraction that may need updating after WhatsApp changes. If a chat has no usable exposed identity, the assistant fails closed and asks you to open a chat with loaded messages. It cannot read history that WhatsApp has not loaded or synced, and does not bypass protected/view-once media.
+WhatsApp's DOM is not a stable public API. `extension/adapter.js` contains the selectors and identity extraction that may need updating after WhatsApp changes. Modern layouts with opaque message IDs require explicit phone confirmation for individual chats. The temporary link is invalidated by navigation, changed headers, or loss of overlap with the confirmed message window. Groups need a usable exposed chat identity; the phone fallback is not a group identifier. Messages without reliable incoming/outgoing evidence are omitted. The assistant cannot read history that WhatsApp has not loaded or synced, and does not bypass protected/view-once media.
 
 A public or business-distributed version would need a separate platform/privacy review. Personal use does not establish that an unofficial integration is supported by WhatsApp.
 
@@ -73,13 +75,14 @@ npx playwright install chromium
 npm run check
 npm test
 npm run test:browser
+npm run test:adapter
 npm run test:extension
 npm run test:setup
 ```
 
 Unit/integration tests cover contact/account isolation, deduplication, retention, key access, source timestamps, stale writes, calendar validation, real OpenAI request construction with injected responses, no-key errors, and FFmpeg preprocessing. Browser tests use isolated Chromium profiles and fictional WhatsApp-shaped fixtures; they do not access your personal browser or send messages. Model responses in test fixtures are explicitly simulated. Production code does not produce fake suggestions when an API key is missing.
 
-Live OpenAI text, image, audio, video, and calendar checks succeeded using fictional data. The current logged-in WhatsApp UI still requires an account-specific check. See `VALIDATION.md` for results recorded with this delivery. The demonstration screenshot uses synthetic contacts and simulated suggestions.
+Live OpenAI text, image, audio, video, and calendar checks succeeded using fictional data. Installation, pairing, panel launch, explicit contact confirmation, and capture of two messages were checked in a logged-in Brave self-chat. Generation and insertion in real WhatsApp remain unverified. See `VALIDATION.md` for the scope and remaining checks. The demonstration screenshot uses synthetic contacts and simulated suggestions.
 
 ## Project map
 
