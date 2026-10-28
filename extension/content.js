@@ -9,12 +9,12 @@
   shell.innerHTML = `
     <button class="launcher" data-testid="toggle" aria-label="Open Threadlight">${sparkle} Threadlight</button>
     <aside class="panel" data-testid="panel" aria-label="Threadlight writing assistant" hidden>
-      <div class="header"><div class="brand-icon">${sparkle}</div><div class="brand">Threadlight</div><span class="spacer"></span><button class="icon-btn" id="settings" aria-label="Settings" title="Settings">⚙</button><button class="icon-btn" id="close" aria-label="Close assistant" title="Close">✕</button></div>
+      <div class="header"><button class="icon-btn" id="close" aria-label="Close assistant" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button><div class="brand">Threadlight</div><span class="spacer"></span><button class="icon-btn" id="settings" aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--header)"/><circle cx="15" cy="17" r="3" fill="var(--header)"/></svg></button></div>
       <div class="chat-strip"><div class="chat-name" id="chat-name">Open a conversation</div></div>
       <nav class="tabs" aria-label="Assistant sections"><button class="tab active" data-tab="write" data-testid="tab-write">Write</button><button class="tab" data-tab="calendar" data-testid="tab-calendar"><span data-testid="mode-calendar">Calendar</span></button><button class="tab" data-tab="memory" data-testid="tab-memory">Memory</button><button class="tab" data-tab="tasks" data-testid="tab-tasks">Commitments</button></nav>
       <div class="body">
         <section id="view-write">
-          <div class="modes"><button class="mode active" data-mode="rewrite" data-testid="mode-rewrite">Rewrite</button><button class="mode" data-mode="reply" data-testid="mode-reply">Suggest a reply</button><button class="mode" data-mode="explain" data-testid="mode-explain">Explain</button></div>
+          <div class="modes"><button class="mode active" data-mode="rewrite" data-testid="mode-rewrite">Rewrite</button><button class="mode" data-mode="reply" data-testid="mode-reply">Suggest a reply</button></div>
           <div class="label-row"><label for="source" id="source-label">Message</label><button class="link-btn" id="use-draft">Use draft</button></div>
           <textarea class="field source" id="source" data-testid="source-text" placeholder="Select text or write a message…" maxlength="20000"></textarea>
           <div class="prompt-wrap"><div class="label-row"><label for="prompt">Instructions</label></div><textarea class="field prompt" id="prompt" data-testid="prompt" placeholder="Tone, length, or details…" maxlength="4000"></textarea></div>
@@ -39,6 +39,55 @@
     </aside>
     <div class="selection-bubble" id="selection-bubble" hidden><button id="ask-selection">${sparkle} Ask Threadlight</button><button id="calendar-selection">Calendar</button></div>`;
   shadow.append(shell); document.documentElement.append(host);
+  const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
+  let themeFrame = 0, themeTargets = [];
+  function explicitTheme(node) {
+    if (!node) return null;
+    for (const attribute of ['data-theme', 'data-color-mode', 'data-color-scheme']) {
+      const value = node.getAttribute(attribute)?.trim().toLowerCase();
+      if (value === 'dark' || value === 'light') return value;
+    }
+    if (node.classList.contains('dark')) return 'dark';
+    if (node.classList.contains('light')) return 'light';
+    return null;
+  }
+  function backgroundTheme(node) {
+    const match = getComputedStyle(node).backgroundColor.match(/^rgba?\(([^)]+)\)$/);
+    if (!match) return null;
+    const values = match[1].split(/[\s,/]+/).filter(Boolean);
+    const alpha = values[3] == null ? 1 : parseFloat(values[3]) / (values[3].endsWith('%') ? 100 : 1);
+    if (alpha < .95 || values.length < 3) return null;
+    const rgb = values.slice(0, 3).map(value => parseFloat(value) / (value.endsWith('%') ? 100 : 255));
+    if (!rgb.every(Number.isFinite)) return null;
+    return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722 < .45 ? 'dark' : 'light';
+  }
+  function syncTheme() {
+    const roots = [document.body, document.documentElement].filter(Boolean);
+    let theme = roots.map(explicitTheme).find(Boolean);
+    if (!theme) theme = roots.map(node => getComputedStyle(node).colorScheme.trim()).find(value => value === 'dark' || value === 'light');
+    if (!theme) {
+      for (let node = document.querySelector('#main header') || document.body; node; node = node.parentElement) {
+        theme = backgroundTheme(node);
+        if (theme) break;
+      }
+    }
+    theme ||= systemDark.matches ? 'dark' : 'light';
+    if (host.dataset.theme !== theme) host.dataset.theme = theme;
+  }
+  function scheduleTheme() {
+    if (!themeFrame) themeFrame = requestAnimationFrame(() => { themeFrame = 0; syncTheme(); });
+  }
+  const themeObserver = new MutationObserver(scheduleTheme);
+  function bindThemeTargets() {
+    const nodes = new Set([document.documentElement, document.body].filter(Boolean));
+    for (let node = document.querySelector('#main header'); node; node = node.parentElement) nodes.add(node);
+    const next = [...nodes];
+    if (next.length === themeTargets.length && next.every((node, index) => node === themeTargets[index])) return;
+    themeObserver.disconnect(); themeTargets = next;
+    for (const node of next) themeObserver.observe(node, { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-mode', 'data-color-scheme'] });
+    scheduleTheme();
+  }
+  bindThemeTargets(); syncTheme(); systemDark.addEventListener('change', scheduleTheme);
   const $ = sel => shadow.querySelector(sel);
   const $$ = sel => [...shadow.querySelectorAll(sel)];
   let opened = false, mode = 'rewrite', activeTab = 'write', chat = null, memory = {}, attachments = [], lastSelection = null, bubblePending = null, accountLabel = '';
@@ -66,7 +115,7 @@
   }
   function setMode(next) {
     if (next === 'calendar') { setTab('calendar'); return; }
-    mode = next; setTab('write');
+    mode = next === 'reply' ? 'reply' : 'rewrite'; setTab('write');
     $$('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
     $('#source-label').textContent = mode === 'reply' ? 'Message · optional' : mode === 'calendar' ? 'Event details' : 'Message';
     $('#prompt').placeholder = mode === 'reply' ? 'What would you like to say?' : mode === 'calendar' ? 'Date, time, or other details…' : mode === 'explain' ? 'What would you like explained?' : 'Tone, length, or details…';
@@ -304,7 +353,7 @@
   $('#prompt').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();safeRun(()=>generate())();}});
   $('#calendar-prompt').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){e.preventDefault();safeRun(()=>generate('calendar'))();}});
   chrome.runtime.onMessage.addListener(message=>{if(message.type==='UI_ACCOUNT_CHANGED'){accountLabel='';resetForChat(null);safeRun(()=>refresh({force:true}))();}if(message.type==='UI_OPEN'){if(message.toggle&&opened)closePanel();else safeRun(()=>openPanel(message.mode||'rewrite',message.text))();}});
-  new MutationObserver(()=>{clearTimeout(debounce);debounce=setTimeout(()=>refresh().catch(e=>setStatus(e.message,true)),280);}).observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['data-id','title','data-testid']});
+  new MutationObserver(()=>{bindThemeTargets();clearTimeout(debounce);debounce=setTimeout(()=>refresh().catch(e=>setStatus(e.message,true)),280);}).observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['data-id','title','data-testid']});
   document.addEventListener('threadlight-view-changed',()=>{if(adapter.getSnapshot().viewId!==currentViewId)safeRun(()=>refresh({force:true}))();});
   safeRun(()=>refresh({force:true}))();
 })();

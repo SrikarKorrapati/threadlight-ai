@@ -9,9 +9,10 @@ Tested on 28 October 2026.
 - 18 dedicated adapter checks passed, covering automatic displayed-name identity, normalization, header transitions, same-name contacts, independent view guards for draft insertion, and the observed modern `conv-msg-*`/`tail-in`/`tail-out` structure.
 - 4 actual Manifest V3 extension checks passed in a disposable Chromium profile. The WhatsApp URL was intercepted with a fictional local fixture; no real account was used.
 - 5 setup-page browser checks passed, covering local key save/removal, concealed key retrieval, pairing rotation, and narrow-screen layout.
+- 12 theme checks passed, covering page-theme precedence over system appearance, live theme changes, header replacement, transparent-background fallback, protection from host-page font overrides, readable contrast, and narrow-screen layout.
 - JavaScript syntax checks passed.
 
-All 118 automated checks passed. The updated writing, Calendar, and setup screens were also visually inspected using fictional fixtures.
+The 0.2.0 build passed its original 118 checks. For the 0.2.1 appearance update, 53 browser checks passed: 32 interaction, 12 theme, 4 actual-extension, and 5 setup checks. The unchanged core and adapter checks retain their prior validation. Writing, Calendar, and setup screens were visually inspected using fictional fixtures.
 
 Test responses are simulated only inside the test harness. The production extension requires the real local service and OpenAI connection.
 
@@ -35,7 +36,7 @@ Live DOM inspection found opaque message IDs and `conv-msg-*` wrappers without t
 
 Version 0.2.0 was then reloaded in Brave and WhatsApp Web was refreshed. Opening a real self-chat selected its history without phone confirmation and showed two saved messages. The live interface contained Write, Calendar, Memory, and Commitments; Calendar opened its own event-details inputs and Prepare event action. No WhatsApp messages were sent and no personal conversation was submitted to OpenAI.
 
-The Progress interface and explanatory taglines were removed. Writing and Calendar now have separate interfaces with a translucent glass treatment. Actual generation/insertion with real WhatsApp remains unverified; no personal chat was submitted to OpenAI during setup checks.
+The Progress interface and explanatory taglines were removed. In version 0.2.1, the glass styling was replaced by an opaque WhatsApp-style sidebar with green controls and automatic light/dark appearance. Explain was removed from Write and the selection context menu. The updated extension was reloaded in Brave; a live visual check confirmed matching dark surfaces, sans-serif text, and only Rewrite/Suggest a reply in Write. Writing and Calendar remain separate. Actual generation/insertion with real WhatsApp remains unverified; no personal chat was submitted to OpenAI during setup checks.
 
 The automated fixtures verify the mechanisms, not every live WhatsApp variant. Rows without reliable direction evidence are omitted. All WhatsApp selectors remain isolated in `extension/adapter.js`.
 

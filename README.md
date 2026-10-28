@@ -4,7 +4,7 @@ A context-aware, multimodal writing assistant for WhatsApp Web, built with a Man
 
 Select text in WhatsApp, describe the change you want, and choose from three OpenAI suggestions. Use the explicit **Suggest a reply** action to draft a response using that conversation's captured context and your writing style.
 
-The interface uses translucent glass panels and compact controls. This is an unpacked Chrome/Chromium extension and a local Node service. It is a personal prototype, not an official WhatsApp integration. Historical question-answering is intentionally absent.
+The interface follows WhatsApp Web’s light or dark appearance, with opaque surfaces, green controls, and readable system typography. This is an unpacked Chrome/Chromium extension and a local Node service. It is a personal prototype, not an official WhatsApp integration. Historical question-answering is intentionally absent.
 
 ![Threadlight assistant in a fictional WhatsApp conversation](demo/preview.png)
 
@@ -23,11 +23,10 @@ Keep the terminal running while you use the assistant. Press Ctrl+C there to sto
 
 ## What you can do
 
-- **Select → prompt → suggestions.** Highlight a message or part of a draft, choose **Ask Threadlight**, write instructions such as “make it friendly but direct,” and generate three options. Right-click selected text also offers rewrite, explain, and calendar actions. Ctrl/Cmd+Enter submits the prompt.
+- **Select → prompt → suggestions.** Highlight a message or part of a draft, choose **Ask Threadlight**, write instructions such as “make it friendly but direct,” and generate three options. Right-click selected text also offers rewrite and calendar actions. Ctrl/Cmd+Enter submits the prompt.
 - **Suggest a reply.** Use the explicit button, optionally describe what you want to convey, and generate three responses. The current conversation, outgoing-message examples, accepted rewrites, and saved preferences supply context.
 - **Use a draft.** Insert or copy a suggestion. A selected portion of your draft can be replaced without changing the rest. If the chat or draft changes after generation, insertion is refused so your new text is not overwritten. The extension never clicks Send.
 - **Automatic conversation memory.** Loaded messages are captured and updated locally as you chat, including while the assistant panel is closed. Switching chats selects memory using the displayed contact or group name, within your configured WhatsApp account label. Scroll up to capture older loaded messages, or import a `.txt` export in Memory. For text imports, enter your exact sender name as it appears in the export. Names are normalized for whitespace and Unicode while preserving case. Matching names share history; renaming a contact selects a different history. The update preserves uniquely matching legacy histories; ambiguous legacy records remain stored without being merged.
-- **Explain.** Explain the selected message in context. There is no standalone history-search or FAQ interface.
 - **Calendar.** Select a message and choose Calendar to open its dedicated tab. Review/edit the date, time, location, and notes. Ask Threadlight opens the separate writing tools. Missing details stay unresolved until you supply them. **Review in Google Calendar** opens a prefilled event; you must press **Save** in Google Calendar. The extension does not silently create events or invite participants.
 - **Commitments.** Click **Find commitments** to review possible promises from retained history. Mark them done or dismissed. This is an on-demand inbox, not an always-running monitor or notification system.
 
@@ -75,13 +74,14 @@ npm run check
 npm test
 npm run test:browser
 npm run test:adapter
+npm run test:theme
 npm run test:extension
 npm run test:setup
 ```
 
 Unit/integration tests cover contact/account isolation, deduplication, retention, key access, source timestamps, stale writes, calendar validation, real OpenAI request construction with injected responses, no-key errors, and FFmpeg preprocessing. Browser tests use isolated Chromium profiles and fictional WhatsApp-shaped fixtures; they do not access your personal browser or send messages. Model responses in test fixtures are explicitly simulated. Production code does not produce fake suggestions when an API key is missing.
 
-Live OpenAI text, image, audio, video, and calendar checks succeeded using fictional data. Version 0.2 was reloaded in a logged-in Brave session: automatic name selection, saved self-chat history, the removed phone/Progress UI, and the separate Calendar screen were verified. The 118 automated checks include history updates while the panel is closed. Generation and insertion in real WhatsApp remain unverified. See `VALIDATION.md` for the scope and remaining checks. The demonstration screenshot uses synthetic contacts and simulated suggestions.
+Live OpenAI text, image, audio, video, and calendar checks succeeded using fictional data. The extension was reloaded in a logged-in Brave session: automatic name selection, saved self-chat history, the removed phone/Progress UI, and the separate Calendar screen were verified. Automated checks include history updates while the panel is closed. Version 0.2.1 additionally passed 12 theme checks and was visually verified against WhatsApp’s dark appearance. Generation and insertion in real WhatsApp remain unverified. See `VALIDATION.md` for the scope and remaining checks. The demonstration screenshot uses synthetic contacts and simulated suggestions.
 
 ## Project map
 
