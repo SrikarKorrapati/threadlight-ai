@@ -32,6 +32,44 @@ export function loadMemoryStore(value) {
   if (value.version !== 1 || !value.chats || typeof value.chats !== 'object' || Array.isArray(value.chats)) throw new Error('Saved memory format is unsupported.');
   return value;
 }
+/** Prepare the one-time transition from legacy IDs to displayed-name scopes.
+ * Returns a fresh store; callers must persist it before exposing migrated state.
+ * Ambiguous legacy records remain untouched and are never reconsidered once marked.
+ */
+export function migrateNameIdentityStore(value) {
+  const store = structuredClone(loadMemoryStore(value));
+  if (store.nameIdentityVersion === 1) return { store, changed: false, migrated: 0 };
+  if (store.nameIdentityVersion != null) throw new Error('Saved name identity version is unsupported.');
+  if (Object.keys(store.chats).length === 0) return { store, changed: false, migrated: 0 };
+  const groups = new Map();
+  for (const [key, record] of Object.entries(store.chats)) {
+    let parts;
+    try { parts = JSON.parse(key); } catch { continue; }
+    if (!Array.isArray(parts) || parts.length !== 2 || typeof parts[0] !== 'string' || typeof parts[1] !== 'string'
+      || !parts[0].trim() || parts[0].trim().length > 120 || !record?.chat || record.chat.id !== parts[1] || typeof record.chat.name !== 'string') continue;
+    const name = record.chat.name.replace(/[\u200b\u200e\u200f]/g, '').trim().replace(/\s+/g, ' ').normalize('NFC').slice(0, 160);
+    if (!name) continue;
+    const account = parts[0].trim(), groupKey = JSON.stringify([account, name]);
+    const item = { key, record, account, name, legacy: parts[1].startsWith('wa:') || parts[1].startsWith('manual:phone:') };
+    if (!groups.has(groupKey)) groups.set(groupKey, []);
+    groups.get(groupKey).push(item);
+  }
+  let migrated = 0;
+  for (const candidates of groups.values()) {
+    if (candidates.length !== 1 || !candidates[0].legacy) continue;
+    const { key, record, account, name } = candidates[0];
+    const id = 'name:' + name, destination = scopeKey(account, { id, name });
+    if (own(store.chats, destination)) continue;
+    record.chat = { ...record.chat, id, name };
+    store.chats[destination] = record;
+    delete store.chats[key];
+    migrated++;
+  }
+  // Persist even if every source was ambiguous. Forgetting a destination later
+  // must never cause preserved legacy records to be adopted on another startup.
+  store.nameIdentityVersion = 1;
+  return { store, changed: true, migrated };
+}
 function emptyRecord(chat, now) {
   return { chat: validateChat(chat), messages: [], profile: '', examples: [], tasks: [], seen: [], accepted: [], recentFeedback: [], updatedAt: now,
     counters: { capturedTotal: 0, acceptedSuggestions: 0, acceptedRewrites: 0, copied: 0, inserted: 0, retentionRemovals: 0, removedTasks: 0, feedbackCounts: {} } };

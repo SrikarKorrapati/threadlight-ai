@@ -1,4 +1,6 @@
-/** Synthetic adapter regression; no WhatsApp or AI network access. */
+/** Automatic displayed-name identity regression using fictional browser data only.
+ * Same displayed names deliberately share an identity; this is a known product limitation.
+ */
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +11,7 @@ const page = await browser.newPage();
 let passed = 0;
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
-const fixture = `<!doctype html><html><body><nav><button id="other">Another Sam</button></nav>
+const fixture = `<!doctype html><html><body><nav><button id="other">Another contact</button></nav>
 <main id="main"><header><span data-testid="conversation-info-header-chat-title" title="Sam">Sam</span></header><section id="messages">
 <div data-id="OPAQUEIN001"><div class="message-in"><div data-pre-plain-text="[10:30, 28/10/2026] Sam: "><span class="selectable-text">Their wording.</span></div></div></div>
 <div class="message-out" data-id="OPAQUEOUT002"><div data-pre-plain-text="[10:31, 28/10/2026] You: "><span class="selectable-text">My wording.</span></div></div>
@@ -22,115 +24,96 @@ async function reset() {
   await page.evaluate(() => { window.sent = 0; document.getElementById('send').onclick = () => window.sent++; });
   await page.addScriptTag({ path: path.join(root, 'extension/adapter.js') });
 }
-const snapshot = () => page.evaluate(() => { const s = WACopilot.adapter.getSnapshot(); return { chat: s.chat, messages: s.messages, draft: s.draft, binding: s.binding }; });
-const bind = () => page.evaluate(() => WACopilot.adapter.bindConversation('+1 202-555-0123'));
+const snapshot = () => page.evaluate(() => { const s = WACopilot.adapter.getSnapshot(); return { chat: s.chat, messages: s.messages, draft: s.draft, viewId: s.viewId }; });
+const rename = name => page.evaluate(name => { const n = document.querySelector('header span'); n.title = name; n.textContent = name; }, name);
 const check = async (name, fn) => { await reset(); await fn(); passed++; console.log(`PASS ${name}`); };
 try {
-  await check('opaque IDs keep messages available but require explicit identity', async () => {
-    const s = await snapshot();
-    assert.equal(s.chat, null); assert.equal(s.binding.required, true); assert.equal(s.binding.canBind, true);
-    assert.equal(s.binding.name, 'Sam'); assert.equal(s.binding.suggestedPhone, '');
+  await check('displayed name automatically supplies the conversation identity', async () => {
+    const s = await snapshot(); assert.deepEqual(s.chat, { id: 'name:Sam', name: 'Sam' });
     assert.deepEqual(s.messages.map(m => m.direction), ['in', 'out', 'in']);
     assert.deepEqual(s.messages.map(m => m.id), ['OPAQUEIN001', 'OPAQUEOUT002', 'album-OPAQUEA-OPAQUEB-4']);
     assert.equal(s.messages[0].text, 'Their wording.'); assert.equal(s.messages[1].text, 'My wording.');
     assert.equal(s.messages[2].kind, 'image'); assert.match(s.messages[2].text, /contents not captured/);
   });
-  await check('manual phone binding validates E164 and normalizes separators', async () => {
-    assert.deepEqual(await bind(), { ok: true, chat: { id: 'manual:phone:+12025550123', name: 'Sam' } });
-    assert.equal((await snapshot()).binding.required, false);
-    const invalid = await page.evaluate(() => ['2025550123', '+123', '+1234567890123456', '+0123456789', '+12025550123ext4', 'Sam +12025550123'].map(phone => { try { WACopilot.adapter.bindConversation(phone); return false; } catch { return true; } }));
-    assert.ok(invalid.every(Boolean));
+  await check('name identity normalizes Unicode NFC and whitespace while preserving case', async () => {
+    await rename('  Jose\u0301\u00a0\n  Rao  ');
+    assert.deepEqual((await snapshot()).chat, { id: 'name:José Rao', name: 'José Rao' });
+    await rename('JOSÉ Rao'); assert.equal((await snapshot()).chat.id, 'name:JOSÉ Rao');
+    await rename('josé Rao'); assert.equal((await snapshot()).chat.id, 'name:josé Rao');
   });
-  await check('same-name contact switch invalidates on disjoint IDs', async () => {
-    await bind();
-    await page.evaluate(() => document.querySelectorAll('#messages [data-id]').forEach(n => n.dataset.id = 'OTHER' + n.dataset.id));
-    const s = await snapshot(); assert.equal(s.chat, null); assert.equal(s.binding.required, true); assert.match(s.binding.reason, /conversation changed/);
+  await check('normalized display names are capped to the memory-compatible 160 characters', async () => {
+    await rename('A'.repeat(170));
+    const chat = (await snapshot()).chat; assert.equal(chat.name, 'A'.repeat(160)); assert.equal(chat.id, 'name:' + 'A'.repeat(160));
   });
-  await check('root, header, and header-name changes invalidate binding', async () => {
-    for (const kind of ['header', 'root', 'name']) {
-      await reset(); await bind();
-      await page.evaluate(kind => {
-        if (kind === 'name') { const n = document.querySelector('header span'); n.title = 'Other person'; n.textContent = 'Other person'; }
-        else { const node = document.querySelector(kind === 'root' ? '#main' : 'header'); node.replaceWith(node.cloneNode(true)); }
-      }, kind);
-      assert.equal((await snapshot()).chat, null);
-    }
+  await check('same name retains identity across reload, root replacement, and scrolled message windows', async () => {
+    const expected = (await snapshot()).chat.id;
+    await reset(); assert.equal((await snapshot()).chat.id, expected);
+    await page.evaluate(() => { const root = document.getElementById('main'); root.replaceWith(root.cloneNode(true)); });
+    assert.equal((await snapshot()).chat.id, expected);
+    await page.evaluate(() => document.querySelectorAll('#messages [data-id]').forEach(n => n.dataset.id = 'OLDER' + n.dataset.id));
+    assert.equal((await snapshot()).chat.id, expected);
   });
-  await check('outside navigation invalidates without requiring a DOM mutation', async () => {
-    await bind(); await page.locator('#other').click(); assert.equal((await snapshot()).chat, null);
-    await bind(); await page.evaluate(() => document.getElementById('other').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, composed: true })));
-    assert.equal((await snapshot()).chat, null);
+  await check('different displayed names and a renamed contact receive different identities', async () => {
+    const first = (await snapshot()).chat.id;
+    await rename('Alex'); const second = (await snapshot()).chat.id;
+    assert.equal(second, 'name:Alex'); assert.notEqual(second, first);
+    await rename('Alex Work'); assert.equal((await snapshot()).chat.id, 'name:Alex Work');
   });
-  await check('assistant shadow UI and composer clicks preserve current binding', async () => {
-    await bind();
-    await page.evaluate(() => { const shadow = document.getElementById('threadlight-root').attachShadow({ mode: 'open' }); const b = document.createElement('button'); b.textContent = 'Use'; shadow.append(b); b.click(); document.getElementById('composer').click(); });
-    assert.equal((await snapshot()).chat.id, 'manual:phone:+12025550123');
+  await check('two contacts with the same displayed name intentionally share the name identity', async () => {
+    const before = (await snapshot()).chat.id;
+    await page.evaluate(() => document.querySelectorAll('#messages [data-id]').forEach(n => n.dataset.id = 'OTHERPERSON' + n.dataset.id));
+    assert.equal((await snapshot()).chat.id, before);
   });
-  await check('clearBinding and reload never restore identity from display name', async () => {
-    await bind(); await page.evaluate(() => WACopilot.adapter.clearBinding()); assert.equal((await snapshot()).chat, null);
-    await bind(); await reset(); assert.equal((await snapshot()).chat, null);
+  await check('old mounted rows are excluded after a header transition, while new rows and reloads work', async () => {
+    assert.equal((await snapshot()).messages.length, 3);
+    await rename('Other');
+    const transitioning = await snapshot(); assert.equal(transitioning.chat.id, 'name:Other'); assert.deepEqual(transitioning.messages, []);
+    await page.evaluate(() => document.querySelectorAll('#messages [data-id]').forEach(n => n.dataset.id = 'NEWCONTACT' + n.dataset.id));
+    assert.equal((await snapshot()).messages.length, 3);
+    await reset(); await rename('Other');
+    const reloaded = await snapshot(); assert.equal(reloaded.chat.id, 'name:Other'); assert.equal(reloaded.messages.length, 3);
   });
-  await check('anchor overlap permits new messages but does not learn replacement anchors', async () => {
-    await bind();
-    await page.evaluate(() => { const n = document.createElement('div'); n.className = 'message-in'; n.dataset.id = 'NEWINCOMING'; n.innerHTML = '<span class="selectable-text">Another message.</span>'; document.getElementById('messages').append(n); });
-    assert.equal((await snapshot()).chat.id, 'manual:phone:+12025550123');
-    await page.evaluate(() => document.querySelectorAll('#messages > div').forEach(n => { if (n.dataset.id !== 'NEWINCOMING') n.remove(); }));
-    assert.equal((await snapshot()).chat, null);
+  await check('an absent or empty header and absent main never produce a guessed identity', async () => {
+    await rename('   '); assert.equal((await snapshot()).chat, null);
+    await reset(); await page.evaluate(() => document.querySelector('#main header').remove()); assert.equal((await snapshot()).chat, null);
+    await reset(); await page.evaluate(() => document.getElementById('main').remove()); assert.equal((await snapshot()).chat, null);
   });
-  await check('partial insertion preserves surrounding text and never sends', async () => {
-    await bind();
+  await check('there is no manual phone API and navigation preserves the storage identity', async () => {
+    const result = await page.evaluate(() => ({ bind: typeof WACopilot.adapter.bindConversation, clear: typeof WACopilot.adapter.clearBinding }));
+    assert.deepEqual(result, { bind: 'undefined', clear: 'undefined' });
+    await page.locator('#other').click(); assert.equal((await snapshot()).chat.id, 'name:Sam');
+  });
+  await check('partial draft insertion preserves surrounding text and never sends', async () => {
     const result = await page.evaluate(() => {
       const box = document.getElementById('composer'), range = document.createRange();
       range.setStart(box.firstChild, 6); range.setEnd(box.firstChild, 20);
       getSelection().removeAllRanges(); getSelection().addRange(range);
       const selected = WACopilot.adapter.getSelection(), current = WACopilot.adapter.getSnapshot();
-      const inserted = WACopilot.adapter.insertDraft('review the design', { expectedChatId: current.chat.id, expectedDraft: current.draft, range: selected.range });
+      const inserted = WACopilot.adapter.insertDraft('review the design', { expectedChatId: current.chat.id, expectedDraft: current.draft, expectedViewId: current.viewId, range: selected.range });
       return { inserted, text: box.innerText, sent, own: selected.fromComposer };
     });
     assert.equal(result.inserted.ok, true); assert.equal(result.own, true);
     assert.equal(result.text, 'Please review the design today.'); assert.equal(result.sent, 0);
   });
-  await check('stale manual binding and changed draft both refuse insertion', async () => {
-    await bind();
+  await check('changed draft or changed displayed name refuses stale draft insertion', async () => {
     const result = await page.evaluate(() => {
       const current = WACopilot.adapter.getSnapshot();
       document.getElementById('composer').textContent = 'My new unsaved draft';
       const changed = WACopilot.adapter.insertDraft('Wrong draft', { expectedChatId: current.chat.id, expectedDraft: current.draft });
-      WACopilot.adapter.clearBinding();
+      const header = document.querySelector('header span'); header.title = 'Alex'; header.textContent = 'Alex';
       const stale = WACopilot.adapter.insertDraft('Wrong contact', { expectedChatId: current.chat.id, expectedDraft: 'My new unsaved draft' });
       return { changed, stale, text: document.getElementById('composer').innerText };
     });
     assert.equal(result.changed.ok, false); assert.equal(result.stale.ok, false); assert.equal(result.text, 'My new unsaved draft');
   });
-  await check('only an exact international phone header is suggested', async () => {
-    for (const [name, expected] of [['+1 202-555-0123 (You)', '+12025550123'], ['+1 202-555-0123', '+12025550123'], ['Sam +1 202-555-0123', ''], ['+1 202-555-0123 (Work)', '']]) {
-      await page.evaluate(name => { const n = document.querySelector('header span'); n.title = name; n.textContent = name; }, name);
-      assert.equal((await snapshot()).binding.suggestedPhone, expected);
-    }
-  });
-  await check('missing row direction or an empty message list cannot be bound', async () => {
-    await page.evaluate(() => document.getElementById('messages').innerHTML = '<div data-id="OPAQUE"><span class="selectable-text">Unclassified.</span></div>');
-    const s = await snapshot(); assert.equal(s.binding.canBind, false); assert.equal(s.messages.length, 0);
-    assert.equal(await page.evaluate(() => { try { WACopilot.adapter.bindConversation('+12025550123'); return false; } catch { return true; } }), true);
-  });
-  await check('legacy JIDs remain automatic and mixed identities fail closed', async () => {
+  await check('mixed legacy identities still wait instead of using the current name immediately', async () => {
     await page.evaluate(() => {
       document.querySelector('[data-id="OPAQUEIN001"]').dataset.id = 'false_12025550123@c.us_FIRST';
       document.querySelector('[data-id="OPAQUEOUT002"]').dataset.id = 'true_12025550123@c.us_SECOND';
     });
-    assert.equal((await snapshot()).chat.id, 'wa:12025550123@c.us');
+    assert.equal((await snapshot()).chat.id, 'name:Sam');
     await page.evaluate(() => document.querySelector('.message-out').dataset.id = 'true_12025550124@c.us_SECOND');
-    const mixed = await snapshot(); assert.equal(mixed.chat, null); assert.equal(mixed.binding.canBind, false);
-  });
-  await check('binding invalidation event is deferred and stale notifications are suppressed', async () => {
-    await bind();
-    const result = await page.evaluate(async () => {
-      let count = 0; document.addEventListener('threadlight-binding-invalidated', () => count++);
-      WACopilot.adapter.clearBinding(); const synchronous = count; await Promise.resolve(); const deferred = count;
-      WACopilot.adapter.bindConversation('+12025550123'); WACopilot.adapter.clearBinding(); WACopilot.adapter.bindConversation('+12025550123');
-      await Promise.resolve(); return { synchronous, deferred, final: count };
-    });
-    assert.deepEqual(result, { synchronous: 0, deferred: 1, final: 1 });
+    assert.equal((await snapshot()).chat, null);
   });
   await check('observed conv-msg wrappers use explicit tail markers without message classes', async () => {
     await page.evaluate(() => {
@@ -142,13 +125,63 @@ try {
         <div role="row"><div data-id="album-MODERNA-MODERNB-4" data-testid="conv-msg-album-MODERNA-MODERNB-4"><div data-testid="msg-container"><span data-testid="tail-in"></span><span data-testid="image-thumb"></span><div data-id="ALBUMNESTED" data-testid="conv-msg-ALBUMNESTED"><span data-testid="tail-in"></span><span data-testid="image-thumb"></span></div></div></div></div>`;
     });
     assert.equal(await page.locator('.message-in,.message-out').count(), 0);
-    const s = await snapshot(); assert.equal(s.chat, null); assert.equal(s.binding.canBind, true);
+    const s = await snapshot(); assert.equal(s.chat.id, 'name:Sam');
     assert.deepEqual(s.messages.map(m => m.id), ['MODERNIN1', 'MODERNOUT2', 'album-MODERNA-MODERNB-4']);
     assert.deepEqual(s.messages.map(m => m.direction), ['in', 'out', 'in']);
     assert.equal(s.messages[0].text, 'Incoming modern message.'); assert.equal(s.messages[1].text, 'My modern message.');
     assert.match(s.messages[2].text, /image attachment/);
-    assert.equal((await bind()).chat.id, 'manual:phone:+12025550123');
+  });
+  await check('same-name contact with identical draft refuses stale-view insertion', async () => {
+    const result = await page.evaluate(() => {
+      const previous = WACopilot.adapter.getSnapshot();
+      document.querySelectorAll('#messages [data-id]').forEach(n => n.dataset.id = 'OTHERPERSON' + n.dataset.id);
+      const current = WACopilot.adapter.getSnapshot();
+      const inserted = WACopilot.adapter.insertDraft('Wrong person suggestion', { expectedChatId: previous.chat.id, expectedDraft: previous.draft, expectedViewId: previous.viewId });
+      return { previous: { id: previous.chat.id, draft: previous.draft, viewId: previous.viewId }, current: { id: current.chat.id, draft: current.draft, viewId: current.viewId }, inserted, after: document.getElementById('composer').innerText };
+    });
+    assert.equal(result.previous.id, result.current.id); assert.equal(result.previous.draft, result.current.draft);
+    assert.ok(result.current.viewId > result.previous.viewId); assert.equal(result.inserted.ok, false);
+    assert.match(result.inserted.error, /view changed/); assert.equal(result.after, result.previous.draft);
+  });
+  await check('view identity remains stable for edited and newly appended messages with overlap', async () => {
+    const before = await snapshot();
+    await page.evaluate(() => {
+      document.querySelector('.message-out .selectable-text').textContent = 'An edited message';
+      const n = document.createElement('div'); n.dataset.id = 'NEWAPPENDED'; n.className = 'message-in'; n.innerHTML = '<span class="selectable-text">New message</span>'; document.getElementById('messages').append(n);
+    });
+    const after = await snapshot(); assert.equal(after.viewId, before.viewId); assert.equal(after.messages.length, 4);
+    await page.evaluate(() => document.querySelector('[data-id="OPAQUEOUT002"]').remove());
+    assert.equal((await snapshot()).viewId, before.viewId);
+  });
+  await check('root, header and name changes each advance the ephemeral view counter', async () => {
+    for (const kind of ['root', 'header', 'name']) {
+      await reset(); const before = await snapshot();
+      await page.evaluate(kind => {
+        if (kind === 'name') { const n = document.querySelector('header span'); n.title = 'Other'; n.textContent = 'Other'; }
+        else { const n = document.querySelector(kind === 'root' ? '#main' : 'header'); n.replaceWith(n.cloneNode(true)); }
+      }, kind);
+      assert.ok((await snapshot()).viewId > before.viewId);
+    }
+  });
+  await check('different available legacy JID advances the view even with an overlapping album', async () => {
+    await page.evaluate(() => {
+      document.querySelector('[data-id="OPAQUEIN001"]').dataset.id = 'false_12025550123@c.us_ONE';
+      document.querySelector('[data-id="OPAQUEOUT002"]').dataset.id = 'true_12025550123@c.us_TWO';
+    });
+    const before = await snapshot();
+    await page.evaluate(() => document.querySelectorAll('#messages [data-id]').forEach(n => { n.dataset.id = n.dataset.id.replace('12025550123@c.us', '12025550124@c.us'); }));
+    const after = await snapshot(); assert.ok(after.viewId > before.viewId); assert.equal(after.chat.id, before.chat.id);
+  });
+  await check('outside navigation advances the view while assistant and composer clicks do not', async () => {
+    const before = await snapshot();
+    await page.evaluate(() => {
+      const shadow = document.getElementById('threadlight-root').attachShadow({ mode: 'open' });
+      const b = document.createElement('button'); b.textContent = 'Use'; shadow.append(b); b.click(); document.getElementById('composer').click();
+    });
+    assert.equal((await snapshot()).viewId, before.viewId);
+    await page.locator('#other').click();
+    const after = await snapshot(); assert.ok(after.viewId > before.viewId); assert.equal(after.chat.id, before.chat.id);
   });
   assert.deepEqual(errors, []);
-  console.log(`\n${passed} isolated adapter binding checks passed.`);
+  console.log(`\n${passed} isolated automatic-name identity checks passed.`);
 } finally { await browser.close(); }

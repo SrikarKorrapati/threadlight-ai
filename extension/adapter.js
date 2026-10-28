@@ -2,31 +2,33 @@
 (() => {
   const ns = globalThis.WACopilot = globalThis.WACopilot || {};
   const clean = value => String(value || '').replace(/[\u200b\u200e\u200f]/g, '').trim();
-  const normalizeName = value => clean(value).replace(/\s+/g, ' ').normalize('NFC');
+  const normalizeName = value => clean(value).replace(/\s+/g, ' ').normalize('NFC').slice(0, 160);
   const main = () => document.querySelector('#main');
   const getComposer = root => root?.querySelector('footer [contenteditable="true"][role="textbox"], footer [contenteditable="true"][data-lexical-editor], footer [contenteditable="true"]') || null;
   const textOf = node => clean(node?.innerText ?? node?.textContent);
-  let manualBinding = null, bindingReason = '', bindingVersion = 0;
+  const observedOwners = new Map();
+  let viewId = 0, lastView = null, viewEventQueued = false;
+  function advanceView(notify = true) {
+    viewId++;
+    if (notify && !viewEventQueued) {
+      viewEventQueued = true;
+      queueMicrotask(() => {
+        viewEventQueued = false;
+        document.dispatchEvent(new CustomEvent('threadlight-view-changed', { detail: { viewId } }));
+      });
+    }
+  }
+  function updateView({ root, header, name, identityIds }, jids) {
+    const ids = new Set(identityIds), jid = jids.length === 1 ? jids[0] : null;
+    const structuralChange = !lastView || root !== lastView.root || header !== lastView.header || name !== lastView.name;
+    const changedJid = !!lastView?.jid && !!jid && lastView.jid !== jid;
+    const disjointWindow = !!lastView?.ids.size && ids.size > 0 && ![...ids].some(id => lastView.ids.has(id));
+    if (structuralChange || changedJid || disjointWindow) advanceView(!!lastView);
+    lastView = { root, header, name, jid: jid || (structuralChange ? null : lastView?.jid),
+      ids: ids.size ? ids : structuralChange ? new Set() : lastView.ids };
+  }
   function jidFromMessageId(value) {
     return String(value || '').match(/^(?:true|false)_([^_\s]+@(?:c\.us|s\.whatsapp\.net|g\.us|lid))_/)?.[1] || null;
-  }
-  function normalizePhone(value) {
-    const phone = clean(value).replace(/[\s\-\u2010-\u2015]/g, '');
-    if (!/^\+[1-9]\d{7,14}$/.test(phone)) throw new Error('Enter an international phone number starting with + and containing 8–15 digits.');
-    return phone;
-  }
-  function suggestedPhone(name) {
-    try { return normalizePhone(name.replace(/\s*\(you\)\s*$/i, '')); } catch { return ''; }
-  }
-  function clearBinding(reason = '') {
-    const existed = !!manualBinding;
-    manualBinding = null; bindingReason = reason;
-    const version = ++bindingVersion;
-    if (existed) queueMicrotask(() => {
-      // Revalidation may happen inside getSnapshot. Notify the UI after it
-      // returns, and suppress a stale event if the user has already rebound.
-      if (version === bindingVersion && !manualBinding) document.dispatchEvent(new CustomEvent('threadlight-binding-invalidated'));
-    });
   }
   function headerName(header) {
     const node = header?.querySelector('[data-testid="conversation-info-header-chat-title"], [data-testid="conversation-info-header"] [title], span[title]')
@@ -76,34 +78,24 @@
   function getSnapshot() {
     const { root, header, name, composer, messages, identityIds } = inspectConversation();
     const jids = [...new Set(identityIds.map(jidFromMessageId).filter(Boolean))];
-    if (manualBinding && (manualBinding.root !== root || manualBinding.header !== header || manualBinding.name !== name
-      || !identityIds.some(id => manualBinding.anchors.has(id)) || jids.length)) {
-      clearBinding('The conversation changed. Link this conversation again before using its memory.');
-    }
-    let chat = null;
-    // Mixed legacy identities can be a transition; manual linking must wait too.
-    if (jids.length === 1) chat = { id: 'wa:' + jids[0], name: name || 'Current conversation' };
-    else if (!jids.length && manualBinding) chat = { id: manualBinding.id, name: manualBinding.name };
-    const canBind = !!root && !!header && !!name && messages.length > 0 && jids.length === 0;
+    updateView({ root, header, name, identityIds }, jids);
+    // Equal display names intentionally share history within an account.
+    // Mixed legacy IDs still signal a transition: wait for it to settle.
+    const chat = root && header && name && jids.length <= 1 ? { id: 'name:' + name, name } : null;
     const reason = !root ? 'Open a WhatsApp conversation first.'
       : jids.length > 1 ? 'WhatsApp is changing conversations. Wait, then try again.'
       : !header || !name ? 'The conversation header is unavailable.'
-      : !messages.length ? 'Load a message before linking this conversation.'
-      : chat ? '' : bindingReason || 'Link this one-to-one conversation to its international phone number before using memory.';
-    return { chat, messages, draft: textOf(composer), composer,
-      binding: { required: !!root && !chat, canBind, name, suggestedPhone: suggestedPhone(name), reason } };
-  }
-  function bindConversation(value) {
-    const phone = normalizePhone(value), snapshot = getSnapshot();
-    if (!snapshot.binding.canBind) throw new Error(snapshot.binding.reason || 'This conversation already has a verified identity.');
-    const observed = inspectConversation();
-    if (!observed.root || !observed.header || !observed.name || !observed.messages.length || observed.identityIds.some(jidFromMessageId)) throw new Error('The conversation changed. Try linking it again.');
-    manualBinding = { id: 'manual:phone:' + phone, root: observed.root, header: observed.header, name: observed.name, anchors: new Set(observed.identityIds) };
-    bindingVersion++;
-    bindingReason = '';
-    const linked = getSnapshot();
-    if (!linked.chat) throw new Error('The conversation changed before it could be linked.');
-    return { ok: true, chat: linked.chat };
+      : '';
+    // A header can update before the old message rows disappear. Do not capture
+    // rows already observed under a different name into the newly opened chat.
+    const currentMessages = chat ? messages.filter(message => {
+      const previous = observedOwners.get(message.id);
+      if (previous && previous !== chat.id) return false;
+      observedOwners.set(message.id, chat.id);
+      if (observedOwners.size > 6000) observedOwners.delete(observedOwners.keys().next().value);
+      return true;
+    }) : [];
+    return { chat, messages: currentMessages, draft: textOf(composer), composer, reason, viewId };
   }
   function getSelection() {
     const sel = window.getSelection(), root = main();
@@ -116,9 +108,10 @@
     const prefix = node?.closest('[data-pre-plain-text]')?.getAttribute('data-pre-plain-text') || row?.querySelector('[data-pre-plain-text]')?.getAttribute('data-pre-plain-text') || '';
     return { text: sel.toString().trim(), range: range.cloneRange(), fromComposer, sourceTimestamp: prefix.match(/^\[([^\]]*)\]/)?.[1] || '' };
   }
-  function insertDraft(text, { expectedChatId, expectedDraft, range = null } = {}) {
+  function insertDraft(text, { expectedChatId, expectedDraft, expectedViewId, range = null } = {}) {
     const snap = getSnapshot();
     if (!snap.chat || snap.chat.id !== expectedChatId) return { ok: false, error: 'The conversation changed. Generate suggestions in the current chat.' };
+    if (expectedViewId !== undefined && expectedViewId !== snap.viewId) return { ok: false, error: 'The conversation view changed. Generate suggestions again before inserting a draft.' };
     if (!snap.composer) return { ok: false, error: 'The WhatsApp draft box is unavailable. Copy the suggestion instead.' };
     if (snap.draft !== expectedDraft) return { ok: false, error: 'Your draft changed after generation. Copy this suggestion or generate again.' };
     if (range && (!range.startContainer.isConnected || !snap.composer.contains(range.commonAncestorContainer))) return { ok: false, error: 'The selection changed. Select the draft again.' };
@@ -135,15 +128,13 @@
     snap.composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: replacement }));
     return { ok: true };
   }
-  function invalidateOnNavigation(event) {
-    if (!manualBinding) return;
-    const path = event.composedPath();
-    if (path.some(node => node?.id === 'threadlight-root')) return;
-    const root = main(), target = event.target;
-    if (root && target instanceof Node && root.contains(target)) return;
-    clearBinding('Navigation cleared the temporary link. Link the current conversation again.');
+  function observeNavigation(event) {
+    if (event.composedPath().some(node => node?.id === 'threadlight-root')) return;
+    const root = main();
+    if (!root || (event.target instanceof Node && root.contains(event.target))) return;
+    advanceView();
   }
-  document.addEventListener('pointerdown', invalidateOnNavigation, true);
-  document.addEventListener('click', invalidateOnNavigation, true);
-  ns.adapter = { getSnapshot, getSelection, insertDraft, jidFromMessageId, bindConversation, clearBinding };
+  document.addEventListener('pointerdown', observeNavigation, true);
+  document.addEventListener('click', observeNavigation, true);
+  ns.adapter = { getSnapshot, getSelection, insertDraft, jidFromMessageId };
 })();

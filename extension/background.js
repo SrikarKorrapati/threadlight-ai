@@ -1,4 +1,4 @@
-import { createMemoryStore, loadMemoryStore, validateChat, scopeKey, getChatState, captureMessages, saveProfile, recordAcceptance, addCommitments, updateTask, forgetChat, buildGenerationContext } from './memory.js';
+import { createMemoryStore, migrateNameIdentityStore, validateChat, scopeKey, getChatState, captureMessages, saveProfile, recordAcceptance, addCommitments, updateTask, forgetChat, buildGenerationContext } from './memory.js';
 
 export const STORAGE_KEYS = { settings: 'wac.settings.v1', memory: 'wac.memory.v1' };
 export const DEFAULT_SETTINGS = Object.freeze({ bridgeUrl: 'http://127.0.0.1:4318', pairingToken: '', accountLabel: 'Personal' });
@@ -88,7 +88,9 @@ export function createBackground({ chromeApi = globalThis.chrome, fetchImpl = gl
     if (chromeApi.storage.session?.setAccessLevel) await chromeApi.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
     const saved = await chromeApi.storage.local.get([STORAGE_KEYS.settings, STORAGE_KEYS.memory]);
     settings = validateSettings({ ...DEFAULT_SETTINGS, ...saved[STORAGE_KEYS.settings] });
-    memory = loadMemoryStore(saved[STORAGE_KEYS.memory]);
+    const migration = migrateNameIdentityStore(saved[STORAGE_KEYS.memory]);
+    if (migration.changed) await chromeApi.storage.local.set({ [STORAGE_KEYS.memory]: migration.store });
+    memory = migration.store;
   })();
   const publicSettings = () => ({ accountLabel: settings.accountLabel, bridgeUrl: settings.bridgeUrl });
   function checkAccount(message) {
